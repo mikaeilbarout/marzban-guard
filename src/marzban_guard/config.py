@@ -220,13 +220,25 @@ class SecurityConfig(BaseModel):
 
     def limits_for(self, username: str) -> EffectiveLimits:
         override = self.per_user_overrides.get(username)
+
+        def _pick(override_value: int | None, default: int) -> int:
+            # `override_value or default` would be wrong here: 0 is a
+            # legitimate override (e.g. "block this user's new connections
+            # entirely" without a full ban), and Python's `or` treats 0 as
+            # falsy — it would silently fall through to the global default
+            # instead of honoring an explicit 0. Only None means "no
+            # override configured".
+            return override_value if override_value is not None else default
+
         return EffectiveLimits(
-            connection_limit_per_minute=(override.connection_limit_per_minute if override else None)
-            or self.connection_limit_per_minute,
-            connection_limit_per_hour=(override.connection_limit_per_hour if override else None)
-            or self.connection_limit_per_hour,
-            concurrent_limit=(override.concurrent_limit if override else None) or self.concurrent_limit,
-            max_devices=(override.max_devices if override else None) or self.device_limit.max_devices,
+            connection_limit_per_minute=_pick(
+                override.connection_limit_per_minute if override else None, self.connection_limit_per_minute
+            ),
+            connection_limit_per_hour=_pick(
+                override.connection_limit_per_hour if override else None, self.connection_limit_per_hour
+            ),
+            concurrent_limit=_pick(override.concurrent_limit if override else None, self.concurrent_limit),
+            max_devices=_pick(override.max_devices if override else None, self.device_limit.max_devices),
         )
 
 
