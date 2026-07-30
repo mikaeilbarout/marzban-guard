@@ -1,0 +1,25 @@
+# Opt-in overlay for exposing Grafana through a host that already runs its
+# own nginx fronting other sites (mirrors the same pattern used in the
+# Freemiga shop's docker-compose.shared-nginx.yml). NOT auto-loaded by plain
+# `docker compose` — pass it explicitly:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.shared-nginx.yml up -d
+#
+# Attaches grafana to the pre-existing `web_shared` docker network under a
+# stable alias so that external nginx's proxy_pass can reach it by name
+# instead of an IP that changes on every recreate. The web_shared network
+# itself must already exist and the external nginx container must already
+# be connected to it (see the Freemiga repo's README for how that's set up).
+services:
+  grafana:
+    environment:
+      GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-}"
+    networks:
+      default:
+      web_shared:
+        aliases:
+          - marzban_guard_grafana
+
+networks:
+  web_shared:
+    external: true
