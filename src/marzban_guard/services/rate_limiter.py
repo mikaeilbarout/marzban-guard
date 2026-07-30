@@ -28,6 +28,14 @@ new connection in the first moments of a fresh window is briefly absent
 from the count until its next connection — in practice a non-issue, since
 normal VPN traffic opens new connections continuously, but worth knowing
 if you see a device limit not fire exactly the instant a window rolls over.
+
+A third piece, unrelated to rate tracking: get/set_device_limit_override()
+store a persistent (no TTL — it's a standing policy, not a rate metric)
+per-user device-count override in Redis, settable via
+PUT /api/v1/admin/users/{username}/device-limit. This is how an external
+shop can push "this customer's plan allows N devices" without
+marzban-guard needing to know anything about plans — see
+docs/ARCHITECTURE.md#shop-integration-keeping-the-storefront-in-sync.
 """
 from __future__ import annotations
 
@@ -55,6 +63,30 @@ class ConnectionStats:
     destination_port_cap_hit: bool
     distinct_smtp_destination_ips: int
     distinct_client_devices: int
+    # None = no override for this user, fall back to the global default /
+    # YAML per_user_overrides (see config.SecurityConfig.limits_for). Set
+    # via set_device_limit_override() — e.g. by the shop site pushing a
+    # plan's device allowance whenever it provisions an order (PUT
+    # /api/v1/admin/users/{username}/device-limit).
+    device_limit_override: int | None
+
+
+_DEVICE_LIMIT_OVERRIDE_KEY = f"{_KEY_PREFIX}:devlimit_override"
+
+
+async def get_device_limit_override(redis: Redis, username: str) -> int | None:
+    raw = await redis.get(f"{_DEVICE_LIMIT_OVERRIDE_KEY}:{username}")
+    return int(raw) if raw is not None else None
+
+
+async def set_device_limit_override(redis: Redis, username: str, max_devices: int | None) -> None:
+    """None clears the override, reverting that user to the global
+    default / YAML per_user_overrides."""
+    key = f"{_DEVICE_LIMIT_OVERRIDE_KEY}:{username}"
+    if max_devices is None:
+        await redis.delete(key)
+    else:
+        await redis.set(key, max_devices)
 
 
 class SlidingWindowCounter:
@@ -200,6 +232,8 @@ class RateLimiter:
             await smtp_tracker.add_and_count(event.destination_ip, now)
         smtp_ip_count = await smtp_tracker.count(now)
 
+        device_limit_override = await get_device_limit_override(self._redis, user)
+
         return ConnectionStats(
             username=user,
             new_connections_last_minute=await minute_counter.estimate(now),
@@ -212,4 +246,5 @@ class RateLimiter:
             destination_port_cap_hit=port_cap_hit,
             distinct_smtp_destination_ips=smtp_ip_count,
             distinct_client_devices=device_count,
+            device_limit_override=device_limit_override,
         )

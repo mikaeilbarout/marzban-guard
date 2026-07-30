@@ -25,6 +25,7 @@ def _stats(**overrides) -> ConnectionStats:
         destination_port_cap_hit=False,
         distinct_smtp_destination_ips=0,
         distinct_client_devices=1,
+        device_limit_override=None,
     )
     defaults.update(overrides)
     return ConnectionStats(**defaults)
@@ -121,6 +122,21 @@ def test_device_limit_detector_respects_per_user_override(monkeypatch):
     stats = _stats(distinct_client_devices=cfg.device_limit.max_devices + 1)
     result = DeviceLimitDetector().evaluate(make_event(username="vip"), stats, cfg)
     assert result.triggered is False
+
+
+def test_device_limit_detector_prefers_live_override_over_yaml_and_global():
+    """The Redis-backed live override (e.g. pushed by an external shop's
+    plan) takes priority over both the static YAML per_user_override and
+    the global default."""
+    cfg = get_config().security
+    stats = _stats(distinct_client_devices=4, device_limit_override=5)
+    result = DeviceLimitDetector().evaluate(make_event(username="plan-customer"), stats, cfg)
+    assert result.triggered is False  # 4 <= override of 5, even though global default is lower
+
+    stats_over = _stats(distinct_client_devices=6, device_limit_override=5)
+    result_over = DeviceLimitDetector().evaluate(make_event(username="plan-customer"), stats_over, cfg)
+    assert result_over.triggered is True
+    assert result_over.details["max_devices"] == 5
 
 
 def test_run_all_returns_only_triggered_detectors():

@@ -76,6 +76,12 @@ class BlacklistReviewRequest(BaseModel):
     reinstate: bool = False
 
 
+class DeviceLimitIn(BaseModel):
+    # None clears the override, reverting the user to the global default /
+    # YAML per_user_overrides — see DeviceLimitDetector's docstring.
+    max_devices: int | None = None
+
+
 class StatsOut(BaseModel):
     active_users: int
     suspended_users: int

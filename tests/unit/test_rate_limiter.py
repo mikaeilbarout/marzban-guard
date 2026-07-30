@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from marzban_guard.services.rate_limiter import DestinationFanoutTracker, RateLimiter, SlidingWindowCounter
+from marzban_guard.services.rate_limiter import (
+    DestinationFanoutTracker,
+    RateLimiter,
+    SlidingWindowCounter,
+    get_device_limit_override,
+    set_device_limit_override,
+)
 from tests.conftest import make_event
 
 pytestmark = pytest.mark.asyncio
@@ -65,6 +71,28 @@ async def test_rate_limiter_tracks_rejected_separately_from_accepted(redis, secu
     stats = await limiter.record_connection(make_event(username="carol", outcome="rejected"))
     assert stats.rejected_last_minute >= 2
     assert stats.new_connections_last_minute == 0
+
+
+async def test_device_limit_override_defaults_to_none(redis):
+    assert await get_device_limit_override(redis, "nobody-set-this") is None
+
+
+async def test_device_limit_override_set_and_get(redis):
+    await set_device_limit_override(redis, "planholder", 5)
+    assert await get_device_limit_override(redis, "planholder") == 5
+
+
+async def test_device_limit_override_clear_with_none(redis):
+    await set_device_limit_override(redis, "planholder", 5)
+    await set_device_limit_override(redis, "planholder", None)
+    assert await get_device_limit_override(redis, "planholder") is None
+
+
+async def test_rate_limiter_surfaces_device_limit_override_in_stats(redis, security_config):
+    await set_device_limit_override(redis, "premium", 7)
+    limiter = RateLimiter(redis, security_config)
+    stats = await limiter.record_connection(make_event(username="premium"))
+    assert stats.device_limit_override == 7
 
 
 async def test_rate_limiter_counts_distinct_client_devices(redis, security_config):

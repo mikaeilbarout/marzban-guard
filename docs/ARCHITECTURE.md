@@ -113,32 +113,48 @@ tuning thresholds against real traffic before trusting the system to act.
 ### Shop integration (keeping the storefront in sync)
 
 marzban-guard and the customer-facing shop (e.g. Freemiga) are entirely
-separate systems that never share a database or call each other's internal
-APIs — the only thing they have in common is that both talk to the same
-Marzban panel, keyed by username (see the shop's own docs for its side: it
-creates/renews/deletes accounts; marzban-guard only ever restricts an
-existing one).
+separate systems that never share a database — the only thing they have
+in common is that both talk to the same Marzban panel, keyed by username
+(see the shop's own docs for its side: it creates/renews/deletes
+accounts; marzban-guard only ever restricts an existing one). There are
+exactly two narrow API calls that cross this boundary, one in each
+direction:
 
-Without any further integration, that leaves a real gap: if marzban-guard
+**marzban-guard → shop: ban-state sync.** Without this, if marzban-guard
 suspends someone, the shop's own "is this account banned" flag has no way
 of finding out, so a customer could see "active" on the site's dashboard
 while their VPN is actually blocked. `services/shop_notifier.py` closes
-that gap with one best-effort, one-way callback: every time
+that gap with a best-effort, one-way callback: every time
 `MitigationService` actually changes a user's status via the Marzban API
 (escalate, expiry-sweep reinstate, or a manual admin override), it also
 POSTs `{username, banned, reason}` to
 `{shop_integration.base_url}/api/integrations/marzban-guard/status`,
-authenticated with a shared bearer secret
-(`shop_integration.webhook_secret`, matching the shop's own
-`MARZBAN_GUARD_WEBHOOK_SECRET`).
-
-The shop side owns what happens with that — mirroring its own ban flag,
-notifying the customer, whatever it already does for an admin-initiated
-ban. marzban-guard never reads the response beyond logging a failure; a
+authenticated with a shared bearer secret (`shop_integration.webhook_secret`,
+matching the shop's own `MARZBAN_GUARD_WEBHOOK_SECRET`). The shop side owns
+what happens with that — mirroring its own ban flag, notifying the
+customer, whatever it already does for an admin-initiated ban.
+marzban-guard never reads the response beyond logging a failure; a
 down/misconfigured shop callback can never block or delay the actual
 Marzban restriction, which has already happened by the time this fires.
-Leave `shop_integration.base_url` empty to disable this entirely — nothing
-about mitigation depends on it succeeding.
+Leave `shop_integration.base_url` empty to disable this entirely.
+
+**Shop → marzban-guard: per-plan device limits.** The reverse direction:
+`security.device_limit.max_devices` is one global number, but a shop
+selling multiple plans (Basic vs. Family vs. Business) reasonably wants
+different device allowances per plan. Rather than teach marzban-guard
+anything about "plans", it exposes a narrow, generic knob instead:
+`PUT /api/v1/admin/users/{username}/device-limit` (protected by the same
+`admin_api.api_key` as the rest of the admin API) sets a live, persistent
+override in Redis for that one username, read by `DeviceLimitDetector`
+ahead of the static YAML `per_user_overrides`/global default (see
+`services/rate_limiter.get_device_limit_override` /
+`set_device_limit_override`, and `DeviceLimitDetector`'s docstring for the
+full priority order). A shop calls this once whenever it provisions an
+order, passing that plan's device allowance; `max_devices: null` clears
+the override back to the default. Stored in Redis rather than Postgres
+deliberately — it's read on every single connection event (the hot path),
+and it's a standing policy value set explicitly and infrequently, not a
+rate metric, so it carries no TTL.
 
 ## Detector plugin framework
 

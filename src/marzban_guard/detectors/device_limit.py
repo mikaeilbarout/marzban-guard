@@ -8,9 +8,15 @@ from marzban_guard.services.rate_limiter import ConnectionStats
 
 class DeviceLimitDetector(BaseDetector):
     """Flags an account being used from more distinct client IPs than its
-    device limit allows (default 2, per-user overridable via
-    security.per_user_overrides.<username>.max_devices — e.g. a
-    family/business plan).
+    device limit allows (default 2). Resolved in priority order:
+
+      1. stats.device_limit_override — a live Redis value settable via
+         PUT /api/v1/admin/users/{username}/device-limit, e.g. an
+         external shop pushing "this customer's plan allows N devices"
+         whenever it provisions an order.
+      2. security.per_user_overrides.<username>.max_devices — static,
+         set directly in this project's own YAML config.
+      3. security.device_limit.max_devices — the global default.
 
     "Device" here means "distinct client IP seen recently" — there's no
     real device fingerprint available from Xray's access log or Marzban's
@@ -32,7 +38,9 @@ class DeviceLimitDetector(BaseDetector):
         if not device_cfg.enabled:
             return DetectorResult.clean(self.name)
 
-        limit = cfg.limits_for(event.username).max_devices
+        limit = stats.device_limit_override
+        if limit is None:
+            limit = cfg.limits_for(event.username).max_devices
         if stats.distinct_client_devices <= limit:
             return DetectorResult.clean(self.name)
 

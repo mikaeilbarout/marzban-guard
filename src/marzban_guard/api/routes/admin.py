@@ -9,10 +9,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
+from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marzban_guard.api.deps import get_mitigation_service_dep
+from marzban_guard.api.deps import get_mitigation_service_dep, get_redis_dep
 from marzban_guard.config import get_config
 from marzban_guard.db.base import get_db_session
 from marzban_guard.db.models import AbuseEvent, BlacklistEntry, GuardUser, MitigationAction, UserStatus
@@ -23,6 +24,7 @@ from marzban_guard.schemas.admin import (
     BlacklistEntryOut,
     BlacklistReviewRequest,
     ConnectionCreator,
+    DeviceLimitIn,
     MitigationActionOut,
     OverrideRequest,
     StatsOut,
@@ -32,6 +34,7 @@ from marzban_guard.schemas.admin import (
 )
 from marzban_guard.security import require_admin_api_key
 from marzban_guard.services.mitigation import MitigationService
+from marzban_guard.services.rate_limiter import get_device_limit_override, set_device_limit_override
 from marzban_guard.services.scoring import effective_score
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_admin_api_key)])
@@ -196,6 +199,26 @@ async def override_user_status(
     await mitigation.manual_override(session, user, new_status, payload.reason, payload.actor)
     await session.commit()
     return _user_summary(user, datetime.utcnow())
+
+
+@router.put("/users/{username}/device-limit")
+async def set_user_device_limit(
+    username: str, payload: DeviceLimitIn, redis: Redis = Depends(get_redis_dep)
+) -> dict:
+    """Lets an external shop push "this customer's plan allows N devices"
+    without marzban-guard needing to know anything about plans — stored
+    directly in Redis (no DB row needed for a value this cheap and this
+    hot-path-read), consulted by DeviceLimitDetector ahead of the static
+    YAML per_user_overrides/global default. payload.max_devices=null
+    clears the override."""
+    await set_device_limit_override(redis, username, payload.max_devices)
+    return {"ok": True, "username": username, "max_devices": payload.max_devices}
+
+
+@router.get("/users/{username}/device-limit")
+async def get_user_device_limit(username: str, redis: Redis = Depends(get_redis_dep)) -> dict:
+    override = await get_device_limit_override(redis, username)
+    return {"username": username, "max_devices": override}
 
 
 @router.get("/blacklist", response_model=list[BlacklistEntryOut])
