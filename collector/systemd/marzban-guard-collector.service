@@ -1,0 +1,23 @@
+[Unit]
+Description=marzban-guard Xray access-log collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/marzban-guard/collector.env
+ExecStart=/usr/bin/python3 /opt/marzban-guard/xray_log_collector.py
+Restart=always
+RestartSec=5
+User=marzban-guard
+Group=marzban-guard
+# The collector only ever reads the Xray log file and makes outbound
+# HTTPS calls — lock it down accordingly.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/marzban-guard
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

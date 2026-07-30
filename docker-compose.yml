@@ -1,0 +1,130 @@
+version: "3.8"
+
+x-app-env: &app-env
+  MARZBAN_GUARD_CONFIG: /app/config/config.yaml
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+  MARZBAN_ADMIN_USERNAME: ${MARZBAN_ADMIN_USERNAME:?set in .env}
+  MARZBAN_ADMIN_PASSWORD: ${MARZBAN_ADMIN_PASSWORD:?set in .env}
+  INGEST_API_KEY: ${INGEST_API_KEY:?set in .env}
+  ADMIN_API_KEY: ${ADMIN_API_KEY:?set in .env}
+  ADMIN_TELEGRAM_BOT_TOKEN: ${ADMIN_TELEGRAM_BOT_TOKEN:-}
+  ADMIN_TELEGRAM_CHAT_ID: ${ADMIN_TELEGRAM_CHAT_ID:-}
+  MARZBAN_GUARD_WEBHOOK_URL: ${MARZBAN_GUARD_WEBHOOK_URL:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: marzban_guard
+      POSTGRES_USER: marzban_guard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marzban_guard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    restart: "no"
+    environment:
+      <<: *app-env
+    volumes:
+      - ./config/config.yaml:/app/config/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["alembic", "upgrade", "head"]
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+    volumes:
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - geoip_data:/data:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+    volumes:
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - geoip_data:/data:ro
+    ports:
+      - "9100:9100"   # worker's own /metrics — separate process from the API's
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change_me}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./docker/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  # Optional GeoLite2-Country.mmdb — mount your own file at
+  # geoip_data:/GeoLite2-Country.mmdb if geoip.enabled is true in config.yaml.
+  geoip_data:

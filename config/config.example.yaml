@@ -1,0 +1,132 @@
+# marzban-guard configuration.
+#
+# Copy this file to config/config.yaml and edit it. Secrets (passwords,
+# tokens) should NOT be committed — reference them as ${ENV_VAR} and set
+# the actual value in your .env / deployment secrets. Any ${VAR} left
+# unresolved at load time is left as an empty string, not a hard failure,
+# so a missing optional secret (e.g. no Telegram alerts configured) doesn't
+# crash the service.
+
+service:
+  environment: production   # "production" | "development"
+  log_level: INFO           # DEBUG | INFO | WARNING | ERROR
+
+database:
+  url: "postgresql+asyncpg://marzban_guard:${POSTGRES_PASSWORD}@postgres:5432/marzban_guard"
+  pool_size: 10
+  max_overflow: 20
+
+redis:
+  url: "redis://redis:6379/0"
+  stream_name: "mg:events"
+  consumer_group: "mg-workers"
+  # How long raw per-connection counters/sets live before Redis expires
+  # them on their own — this is what actually bounds memory use, not the
+  # detection window below (see docs/ARCHITECTURE.md).
+  key_ttl_seconds: 3600
+
+marzban:
+  base_url: "https://panel.example.com:8000"
+  admin_username: "${MARZBAN_ADMIN_USERNAME}"
+  admin_password: "${MARZBAN_ADMIN_PASSWORD}"
+  request_timeout_seconds: 15
+
+geoip:
+  enabled: true
+  db_path: "/data/GeoLite2-Country.mmdb"
+
+# ---------------------------------------------------------------------------
+# Abuse detection & mitigation. Every value here is a *global default* — any
+# key under security.per_user_overrides.<username> overrides it for that one
+# user (e.g. a legitimate power user who needs a higher connection ceiling).
+# ---------------------------------------------------------------------------
+security:
+  connection_limit_per_minute: 150
+  connection_limit_per_hour: 5000
+  concurrent_limit: 100
+  # Only meaningful if the node's Xray log level emits "rejected" lines —
+  # see docs/DATA_SOURCES.md.
+  failed_connection_threshold_per_minute: 50
+
+  scan_detection:
+    enabled: true
+    window_seconds: 60      # rolling window the two thresholds below apply to
+    port_threshold: 80      # distinct destination ports in the window
+    ip_threshold: 50        # distinct destination IPs in the window
+    port_scan_max_distinct_ips: 5    # port scan = many ports concentrated on few hosts
+    max_tracked_destinations: 2000   # memory-exhaustion guard, see docs/ARCHITECTURE.md
+
+  # Xray's access log has no "connection closed" line, so true concurrency
+  # isn't directly observable — this is a short rolling window used as a
+  # practical stand-in. See docs/DATA_SOURCES.md.
+  concurrency_estimate:
+    window_seconds: 10
+
+  # Heuristic spam-relay detection: flags relaying to an unusually large
+  # number of distinct mail-server IPs on mail ports in a short window.
+  # Reuses scan_detection's window/cap — see SpamDetectionConfig.
+  spam_detection:
+    enabled: true
+    ports: [25, 465, 587]
+    distinct_ip_threshold: 30
+
+  # Points added to a user's rolling abuse score per detector trigger.
+  # These are inputs to detectors/*.py — see docs/ARCHITECTURE.md for the
+  # full scoring algorithm (decay, repeat-offender multiplier, etc).
+  scoring:
+    weights:
+      high_connection_rate: 40
+      port_scan: 60
+      too_many_destination_ips: 35
+      too_many_destination_ports: 35
+      repeated_suspicious_behavior: 80
+      failed_connection_burst: 30
+    # Score decays exponentially with this half-life so old infractions
+    # stop counting against a user who's since behaved.
+    decay_half_life_seconds: 1800
+    # A new trigger only counts as a "repeat offense" (extra bonus) if at
+    # least this long has passed since the user's last flagged event —
+    # otherwise one sustained burst (e.g. one port scan spanning many
+    # connections a few ms apart) would compound the bonus dozens of times
+    # for what is really a single incident.
+    repeat_offense_min_gap_seconds: 60
+    thresholds:
+      level_1: 20    # log only
+      level_2: 50    # + notify admin
+      level_3: 80    # + temporary suspend
+      level_4: 120   # + disable account
+      level_5: 160   # + permanent blacklist (manual review required)
+
+  mitigation:
+    level_4_requires_manual_reenable: true
+    notify_cooldown_seconds: 900   # don't re-alert admin more than once per 15 min per user
+    auto_block:
+      enabled: true    # false = dry-run/monitor-only, nothing actually gets suspended
+      duration: "1h"   # level-3 (temporary suspend) duration; levels 4/5 need manual review
+
+  # Per-user overrides — merged on top of the global security.* values above.
+  per_user_overrides: {}
+  #  heavy_user_example:
+  #    connection_limit_per_minute: 400
+  #    concurrent_limit: 250
+
+notifications:
+  admin_telegram_bot_token: "${ADMIN_TELEGRAM_BOT_TOKEN}"
+  admin_telegram_chat_id: "${ADMIN_TELEGRAM_CHAT_ID}"
+  webhook_url: "${MARZBAN_GUARD_WEBHOOK_URL}"
+
+# Shared secret the node-side collector(s) must send as `Authorization:
+# Bearer <token>` when POSTing events to /api/v1/ingest/events.
+ingest:
+  api_key: "${INGEST_API_KEY}"
+
+# Shared secret for the admin dashboard API (/api/v1/admin/*).
+admin_api:
+  api_key: "${ADMIN_API_KEY}"
+
+worker:
+  consumer_concurrency: 2
+  expiry_sweep_interval_seconds: 30
+  traffic_poll_interval_seconds: 60
+  marzban_node_id: "marzban"
+  metrics_port: 9100   # the worker's own /metrics — separate process from the API, see main_worker.py

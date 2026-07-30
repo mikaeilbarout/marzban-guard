@@ -1,0 +1,66 @@
+{
+  "title": "marzban-guard overview",
+  "uid": "marzban-guard-overview",
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Connection events processed / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(mg_connection_events_processed_total[5m])) by (node_id)", "legendFormat": "{{node_id}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Detector triggers / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(mg_detector_triggers_total[5m])) by (detector)", "legendFormat": "{{detector}}" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Mitigation actions / sec by level",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "sum(rate(mg_mitigation_actions_total[5m])) by (level)", "legendFormat": "level {{level}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Users by status",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "mg_users_by_status", "legendFormat": "{{status}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Redis stream pending entries (unacked)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "mg_stream_pending_entries", "legendFormat": "pending" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Event batch processing duration (p50/p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum(rate(mg_event_consumer_batch_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(mg_event_consumer_batch_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95" }
+      ]
+    }
+  ]
+}
