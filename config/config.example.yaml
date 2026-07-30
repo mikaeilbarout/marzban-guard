@@ -143,3 +143,7 @@ worker:
   traffic_poll_interval_seconds: 60
   marzban_node_id: "marzban"
   metrics_port: 9100   # the worker's own /metrics — separate process from the API, see main_worker.py
+  # How long a read-but-unacked stream entry sits idle before it's
+  # reclaimed and retried (a crashed/stuck consumer never redelivers on
+  # its own) — see EventConsumer._claim_stale_pending.
+  claim_min_idle_seconds: 60

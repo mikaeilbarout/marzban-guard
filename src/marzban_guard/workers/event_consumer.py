@@ -6,6 +6,20 @@ runs the full detect -> score -> mitigate pipeline per event, and does
 exactly one batched Postgres write per read cycle — one upsert-by-append
 per (user, node, minute) into connection_rollups, not one row per raw
 connection. See docs/ARCHITECTURE.md#ingestion for the end-to-end picture.
+
+Redelivery is NOT automatic in Redis Streams: a message read via
+XREADGROUP's ">" that never gets XACKed (worker crash, unhandled
+exception mid-batch) sits in the consumer group's pending-entries list
+forever — no amount of further ">" reads brings it back. _process_once()
+recovers this via XAUTOCLAIM (_claim_stale_pending) every cycle. One known
+residual risk this doesn't solve: if a specific message deterministically
+crashes _handle_event every time it's retried (a "poison message"), the
+whole batch containing it will fail, stay unacked, and keep getting
+reclaimed and retried indefinitely, blocking that batch's progress. A
+proper fix (per-message retry count + dead-lettering) is a reasonable
+follow-up but isn't implemented here — for now this trades "silently lost
+forever" for "loudly stuck and retried forever", which at least shows up
+in mg_stream_pending_entries and the worker's exception logs.
 """
 from __future__ import annotations
 
@@ -67,6 +81,7 @@ class EventConsumer:
         # is unreliable. Real deployments keep the default so an idle
         # consumer long-polls instead of busy-looping.
         self._block_ms = block_ms
+        self._claim_min_idle_ms = config.worker.claim_min_idle_seconds * 1000
 
     async def ensure_group(self) -> None:
         try:
@@ -85,11 +100,44 @@ class EventConsumer:
                 logger.exception("event_type=consumer_iteration_failed")
                 await asyncio.sleep(2)
 
+    async def _claim_stale_pending(self) -> list[tuple[str, dict]]:
+        """Reclaims entries that were read (by this consumer or a sibling
+        that then crashed / threw before acking) and have sat unacked for
+        at least claim_min_idle_seconds. XREADGROUP's ">" NEVER redelivers
+        these on its own — without this, a mid-batch crash means those
+        events are silently never processed again, contradicting this
+        class's whole reason for using a consumer group in the first
+        place. Safe to call from multiple consumers concurrently: Redis
+        only lets one of them win the claim for any given entry."""
+        try:
+            _cursor, claimed, _deleted = await self._redis.xautoclaim(
+                self._stream,
+                self._group,
+                self._consumer_id,
+                min_idle_time=self._claim_min_idle_ms,
+                start_id="0-0",
+                count=_BATCH_SIZE,
+            )
+            return claimed
+        except Exception:
+            logger.exception("event_type=xautoclaim_failed")
+            return []
+
     async def _process_once(self) -> None:
-        response = await self._redis.xreadgroup(
-            self._group, self._consumer_id, {self._stream: ">"}, count=_BATCH_SIZE, block=self._block_ms
-        )
-        if not response:
+        entries: list[tuple[str, dict]] = await self._claim_stale_pending()
+
+        remaining = _BATCH_SIZE - len(entries)
+        if remaining > 0:
+            # Don't block if we already have reclaimed work waiting —
+            # only wait for new messages when there's truly nothing to do.
+            block = None if entries else self._block_ms
+            response = await self._redis.xreadgroup(
+                self._group, self._consumer_id, {self._stream: ">"}, count=remaining, block=block
+            )
+            for _stream_name, messages in response or []:
+                entries.extend(messages)
+
+        if not entries:
             return
 
         with event_consumer_batch_duration_seconds.time():
@@ -99,18 +147,17 @@ class EventConsumer:
             ack_ids: list[str] = []
 
             async with self._sessionmaker() as session:
-                for _stream_name, messages in response:
-                    for message_id, fields in messages:
-                        ack_ids.append(message_id)
-                        raw = fields.get("data")
-                        if not raw:
-                            continue
-                        try:
-                            event = ConnectionEvent.model_validate_json(raw)
-                        except Exception:
-                            logger.warning("event_type=invalid_event_payload", message_id=message_id)
-                            continue
-                        await self._handle_event(session, event, rollups)
+                for message_id, fields in entries:
+                    ack_ids.append(message_id)
+                    raw = fields.get("data")
+                    if not raw:
+                        continue
+                    try:
+                        event = ConnectionEvent.model_validate_json(raw)
+                    except Exception:
+                        logger.warning("event_type=invalid_event_payload", message_id=message_id)
+                        continue
+                    await self._handle_event(session, event, rollups)
 
                 await self._flush_rollups(session, rollups)
                 await session.commit()
@@ -132,8 +179,22 @@ class EventConsumer:
 
         outcome = await self._scoring.process_event(session, event, triggered)
         if outcome:
-            await self._mitigation.apply(session, outcome)
-            mitigation_actions_total.labels(action="scored", level=str(outcome.level)).inc()
+            try:
+                await self._mitigation.apply(session, outcome)
+                mitigation_actions_total.labels(action="scored", level=str(outcome.level)).inc()
+            except Exception:
+                # A transient Marzban API failure here (network blip, 5xx)
+                # must not sink the WHOLE batch's commit — that would
+                # discard the risk-score update and abuse_events row this
+                # scoring pass already staged for THIS user, plus every
+                # other unrelated user's scoring/rollup writes already
+                # staged earlier in the same batch. Safe to isolate:
+                # MitigationService always calls the Marzban API before
+                # writing anything to the session, so a failure here never
+                # leaves a half-written mitigation action behind. The
+                # score itself is unaffected and will simply trigger
+                # mitigation again on this user's next connection.
+                logger.exception("event_type=mitigation_apply_failed", username=event.username, level=outcome.level)
 
         if event.outcome.value == "accepted":
             window_start = event.occurred_at.replace(second=0, microsecond=0)

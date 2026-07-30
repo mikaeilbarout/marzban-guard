@@ -9,17 +9,33 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from marzban_guard.db.models import ConnectionRollup, TrafficSampleRow
 
 
 async def _latest_traffic_sample_per_user(session: AsyncSession, since: datetime) -> list[TrafficSampleRow]:
-    stmt = (
-        select(TrafficSampleRow)
-        .distinct(TrafficSampleRow.username)
-        .where(TrafficSampleRow.sampled_at >= since)
-        .order_by(TrafficSampleRow.username, TrafficSampleRow.sampled_at.desc())
+    """One row per user: their most recent sample at/after `since`.
+
+    Deliberately NOT `select(...).distinct(TrafficSampleRow.username)` —
+    that compiles to Postgres's `DISTINCT ON`, which is exactly "one row
+    per group", but on any other dialect (including the SQLite used in
+    tests) SQLAlchemy silently drops the column argument and falls back
+    to a plain `SELECT DISTINCT` over the whole row — which does NOT
+    deduplicate per user at all, since two samples for the same user
+    differ in `total_bytes`/`sampled_at` and so count as distinct rows.
+    That bug shipped once already; the window-function form below is
+    portable and gives identical, verifiably-correct results on both
+    dialects, so it can actually be covered by the (SQLite-backed) test
+    suite instead of only being "trust me, it works on Postgres"."""
+    row_number = (
+        func.row_number()
+        .over(partition_by=TrafficSampleRow.username, order_by=TrafficSampleRow.sampled_at.desc())
+        .label("rn")
     )
+    subq = select(TrafficSampleRow, row_number).where(TrafficSampleRow.sampled_at >= since).subquery()
+    latest = aliased(TrafficSampleRow, subq)
+    stmt = select(latest).where(subq.c.rn == 1)
     return list((await session.execute(stmt)).scalars().all())
 
 

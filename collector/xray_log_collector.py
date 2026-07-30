@@ -120,18 +120,32 @@ class LogTailer:
 
     def _ensure_open(self) -> bool:
         try:
-            current_inode = os.stat(self._path).st_ino
+            st = os.stat(self._path)
         except FileNotFoundError:
             return False
+        current_inode = st.st_ino
 
-        if self._fh is None or current_inode != self._state.inode:
+        # `logrotate`'s copytruncate strategy (common for daemons that
+        # can't be told to reopen their log file) truncates the file IN
+        # PLACE — same inode, size suddenly smaller than our saved offset.
+        # Inode-only rotation detection misses this entirely: seeking to
+        # a stale offset past the new (small) end of file would silently
+        # skip everything written after the truncation until the file
+        # grows past that stale offset again, at which point reads would
+        # resume at the wrong byte boundary. Treat "smaller than expected"
+        # as a truncation regardless of inode.
+        truncated = current_inode == self._state.inode and st.st_size < self._state.offset
+
+        if self._fh is None or current_inode != self._state.inode or truncated:
             if self._fh:
                 self._fh.close()
             self._fh = open(self._path, errors="replace")
-            if current_inode == self._state.inode:
+            if current_inode == self._state.inode and not truncated:
                 self._fh.seek(self._state.offset)
             else:
-                logger.info("event_type=log_rotated_or_first_open", inode=current_inode)
+                logger.info(
+                    "event_type=log_rotated_or_first_open inode=%s truncated=%s", current_inode, truncated
+                )
                 self._state = TailState(inode=current_inode, offset=0)
         return True
 
@@ -179,7 +193,7 @@ class EventBuffer:
     def add(self, event: dict) -> None:
         if len(self._events) >= self._max_events:
             dropped = self._events.pop(0)
-            logger.warning("event_type=buffer_overflow_dropping_oldest", dropped_username=dropped.get("username"))
+            logger.warning("event_type=buffer_overflow_dropping_oldest dropped_username=%s", dropped.get("username"))
         self._events.append(event)
 
     def drain(self) -> list[dict]:
@@ -203,11 +217,11 @@ def post_batch(cfg: CollectorConfig, events: list[dict]) -> bool:
     try:
         with urllib.request.urlopen(request, timeout=cfg.request_timeout_seconds) as resp:
             if resp.status >= 300:
-                logger.warning("event_type=ingest_post_bad_status", status=resp.status)
+                logger.warning("event_type=ingest_post_bad_status status=%s", resp.status)
                 return False
             return True
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
-        logger.warning("event_type=ingest_post_failed", error=str(exc))
+        logger.warning("event_type=ingest_post_failed error=%s", exc)
         return False
 
 
@@ -216,28 +230,39 @@ def run(cfg: CollectorConfig) -> None:
     buffer = EventBuffer(cfg.max_buffered_events)
     last_flush = time.monotonic()
 
-    logger.info("event_type=collector_starting", log_path=cfg.log_path, node_id=cfg.node_id, ingest_url=cfg.ingest_url)
+    logger.info(
+        "event_type=collector_starting log_path=%s node_id=%s ingest_url=%s",
+        cfg.log_path, cfg.node_id, cfg.ingest_url,
+    )
 
     while True:
-        for line in tailer.poll_lines():
-            event = parse_line(line, cfg.node_id, cfg.email_strip_suffix_at)
-            if event:
-                buffer.add(event)
-
-        should_flush = len(buffer) >= cfg.batch_size or (
-            len(buffer) > 0 and time.monotonic() - last_flush >= cfg.batch_interval_seconds
-        )
-        if should_flush:
-            events = buffer.drain()
-            if post_batch(cfg, events):
-                tailer.save_state()
-            else:
-                # Put them back so a transient outage doesn't lose events —
-                # bounded by EventBuffer's max_events, which will start
-                # dropping the oldest ones if the outage runs long enough.
-                for event in events:
+        try:
+            for line in tailer.poll_lines():
+                event = parse_line(line, cfg.node_id, cfg.email_strip_suffix_at)
+                if event:
                     buffer.add(event)
-            last_flush = time.monotonic()
+
+            should_flush = len(buffer) >= cfg.batch_size or (
+                len(buffer) > 0 and time.monotonic() - last_flush >= cfg.batch_interval_seconds
+            )
+            if should_flush:
+                events = buffer.drain()
+                if post_batch(cfg, events):
+                    tailer.save_state()
+                else:
+                    # Put them back so a transient outage doesn't lose events —
+                    # bounded by EventBuffer's max_events, which will start
+                    # dropping the oldest ones if the outage runs long enough.
+                    for event in events:
+                        buffer.add(event)
+                last_flush = time.monotonic()
+        except Exception:
+            # Never let an unexpected error (a transient OS error reading
+            # the log file, etc.) kill the whole collector — systemd's
+            # Restart=always would bring it back anyway, but restarting
+            # loses nothing here (state is only saved after a successful
+            # flush) and just adds needless restart delay/log noise.
+            logger.exception("event_type=collector_iteration_failed")
 
         tailer.sleep()
 

@@ -51,6 +51,30 @@ async def db_session():
     await engine.dispose()
 
 
+@pytest.fixture
+def sessionmaker_returning(db_session):
+    """Wraps one already-open `db_session` in the async-context-manager
+    shape `async_sessionmaker()` normally provides (`async with
+    maker() as session`), for tests that construct an EventConsumer or
+    similar directly rather than going through the real
+    get_sessionmaker(). Every call returns the SAME session — that's the
+    point: it lets a test observe everything a batch/consumer wrote via
+    its own `db_session` fixture instance."""
+
+    class _Ctx:
+        async def __aenter__(self):
+            return db_session
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Maker:
+        def __call__(self):
+            return _Ctx()
+
+    return _Maker()
+
+
 def make_event(**overrides):
     from marzban_guard.schemas.events import ConnectionEvent
 

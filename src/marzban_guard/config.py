@@ -259,6 +259,14 @@ class WorkerConfig(BaseModel):
     consumer_concurrency: int = 2
     expiry_sweep_interval_seconds: int = 30
     traffic_poll_interval_seconds: int = 60
+    # A message read via XREADGROUP but never XACKed (worker crashed or
+    # threw mid-batch) sits in the consumer group's pending-entries list
+    # FOREVER — Redis never redelivers it on its own, no matter how many
+    # times you call XREADGROUP with ">". This is how long an entry must
+    # have been idle (unclaimed/unacked) before EventConsumer reclaims it
+    # via XAUTOCLAIM and retries it. Too short risks reclaiming a batch a
+    # sibling consumer is still legitimately (slowly) processing.
+    claim_min_idle_seconds: int = 60
     # The worker is a separate process from the API, so its
     # prometheus_client counters live in a separate registry — it needs
     # its own /metrics HTTP server for Prometheus to scrape (see
