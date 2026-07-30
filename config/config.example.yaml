@@ -137,6 +137,15 @@ ingest:
 admin_api:
   api_key: "${ADMIN_API_KEY}"
 
+# Optional callback to the shop site (Freemiga) so ITS OWN ban flag and
+# customer-facing notice stay in sync with a restriction marzban-guard
+# already enforced directly against Marzban. Leave base_url empty to
+# disable — mitigation itself never depends on this succeeding.
+shop_integration:
+  base_url: "${SHOP_BASE_URL}"
+  webhook_secret: "${SHOP_WEBHOOK_SECRET}"
+  request_timeout_seconds: 10
+
 worker:
   consumer_concurrency: 2
   expiry_sweep_interval_seconds: 30

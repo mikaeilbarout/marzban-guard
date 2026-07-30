@@ -18,6 +18,11 @@ security.mitigation.auto_block.enabled is the master dry-run switch: when
 false, levels 3-5 are logged as "would have escalated" and admin is still
 notified, but nothing is actually sent to Marzban — useful for tuning
 thresholds against real traffic before trusting the system to act.
+
+Every status change that actually reaches Marzban also fires a best-effort
+callback to the shop site via ShopNotifier (see services/shop_notifier.py)
+— this is the only thing keeping the shop's own ban flag/customer notice
+in sync with a restriction marzban-guard enforces independently.
 """
 from __future__ import annotations
 
@@ -32,6 +37,7 @@ from marzban_guard.repositories import action_repo, user_repo
 from marzban_guard.services.marzban_client import MarzbanClient
 from marzban_guard.services.notifier import Notifier
 from marzban_guard.services.scoring import ScoringOutcome
+from marzban_guard.services.shop_notifier import ShopNotifier
 
 logger = get_logger("mitigation")
 
@@ -56,10 +62,13 @@ _ACTION_NAME = {
 
 
 class MitigationService:
-    def __init__(self, marzban: MarzbanClient, notifier: Notifier, cfg: MitigationConfig):
+    def __init__(
+        self, marzban: MarzbanClient, notifier: Notifier, cfg: MitigationConfig, shop_notifier: ShopNotifier
+    ):
         self._marzban = marzban
         self._notifier = notifier
         self._cfg = cfg
+        self._shop_notifier = shop_notifier
 
     async def apply(self, session: AsyncSession, outcome: ScoringOutcome) -> None:
         if outcome.level <= 0:
@@ -113,6 +122,8 @@ class MitigationService:
         if target_status == UserStatus.blacklisted:
             await action_repo.add_blacklist_entry(session, user.username, reason)
 
+        await self._shop_notifier.notify_status(user.username, banned=True, reason=reason)
+
         logger.warning(
             "event_type=mitigation_action",
             username=user.username,
@@ -134,6 +145,7 @@ class MitigationService:
         await self._marzban.set_user_status(user.username, active=True)
         await user_repo.set_status(session, user, UserStatus.active, "temporary suspension expired", None)
         await action_repo.add(session, user.username, 0, "reinstate", "temporary suspension expired")
+        await self._shop_notifier.notify_status(user.username, banned=False, reason="")
         logger.info("event_type=mitigation_action", username=user.username, action="reinstate")
 
     async def manual_override(
@@ -147,4 +159,5 @@ class MitigationService:
         await user_repo.set_status(session, user, new_status, reason, None)
         action = "reinstate" if active else _ACTION_NAME.get(new_status, "manual_status_change")
         await action_repo.add(session, user.username, 0, action, reason, actor=actor)
+        await self._shop_notifier.notify_status(user.username, banned=not active, reason=reason if not active else "")
         logger.info("event_type=mitigation_action", username=user.username, action=action, actor=actor)

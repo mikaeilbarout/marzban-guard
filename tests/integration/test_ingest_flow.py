@@ -25,6 +25,7 @@ from marzban_guard.db.base import get_db_session
 from marzban_guard.db.models import GuardUser, MitigationAction, UserStatus
 from marzban_guard.services.mitigation import MitigationService
 from marzban_guard.services.notifier import Notifier
+from marzban_guard.services.shop_notifier import ShopNotifier
 from marzban_guard.workers.event_consumer import EventConsumer
 
 pytestmark = pytest.mark.asyncio
@@ -72,7 +73,9 @@ async def test_ingest_then_consume_flags_port_scan(db_session, redis, sessionmak
     # Now drive the consumer side manually — patch the Marzban client so no
     # real HTTP call happens, and use a no-op notifier.
     marzban = AsyncMock()
-    mitigation = MitigationService(marzban, Notifier(cfg.notifications), cfg.security.mitigation)
+    mitigation = MitigationService(
+        marzban, Notifier(cfg.notifications), cfg.security.mitigation, ShopNotifier(cfg.shop_integration)
+    )
 
     consumer = EventConsumer(
         redis, sessionmaker_returning, mitigation, cfg, consumer_id="test-consumer", block_ms=None
@@ -124,7 +127,9 @@ async def test_stale_pending_entries_are_reclaimed_and_processed(db_session, red
     await redis.xadd(cfg.redis.stream_name, {"data": json.dumps(event_payload)})
 
     marzban = AsyncMock()
-    mitigation = MitigationService(marzban, Notifier(cfg.notifications), cfg.security.mitigation)
+    mitigation = MitigationService(
+        marzban, Notifier(cfg.notifications), cfg.security.mitigation, ShopNotifier(cfg.shop_integration)
+    )
 
     # Simulate a consumer that reads the message and then crashes before
     # acking — a raw xreadgroup call, bypassing EventConsumer entirely.
@@ -208,7 +213,9 @@ async def test_mitigation_failure_for_one_user_does_not_sink_the_whole_batch(
 
     marzban = AsyncMock()
     marzban.set_user_status.side_effect = ConnectionError("simulated Marzban outage")
-    mitigation = MitigationService(marzban, Notifier(cfg.notifications), cfg.security.mitigation)
+    mitigation = MitigationService(
+        marzban, Notifier(cfg.notifications), cfg.security.mitigation, ShopNotifier(cfg.shop_integration)
+    )
 
     consumer = EventConsumer(redis, sessionmaker_returning, mitigation, cfg, consumer_id="c1", block_ms=None)
     await consumer.ensure_group()

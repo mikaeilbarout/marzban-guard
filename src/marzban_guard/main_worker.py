@@ -26,6 +26,7 @@ from marzban_guard.redis_client import get_redis
 from marzban_guard.services.marzban_client import MarzbanClient
 from marzban_guard.services.mitigation import MitigationService
 from marzban_guard.services.notifier import Notifier
+from marzban_guard.services.shop_notifier import ShopNotifier
 from marzban_guard.workers.event_consumer import EventConsumer, expiry_sweep_forever
 from marzban_guard.workers.traffic_poller import TrafficPoller
 
@@ -40,7 +41,8 @@ async def main() -> None:
     sessionmaker = get_sessionmaker()
     marzban = MarzbanClient(cfg.marzban)
     notifier = Notifier(cfg.notifications)
-    mitigation = MitigationService(marzban, notifier, cfg.security.mitigation)
+    shop_notifier = ShopNotifier(cfg.shop_integration)
+    mitigation = MitigationService(marzban, notifier, cfg.security.mitigation, shop_notifier)
 
     if cfg.worker.metrics_port:
         start_http_server(cfg.worker.metrics_port)

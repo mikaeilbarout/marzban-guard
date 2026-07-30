@@ -251,6 +251,21 @@ class AdminApiConfig(BaseModel):
     api_key: str = ""
 
 
+class ShopIntegrationConfig(BaseModel):
+    """marzban-guard never touches the shop's database directly — this is
+    a best-effort callback so the shop's own ban flag (and its
+    customer-facing dashboard/Telegram notice) stays in sync with a
+    restriction already enforced directly against Marzban. Leave
+    base_url empty to disable it entirely; nothing about mitigation
+    itself depends on this succeeding. Distinct from
+    notifications.webhook_url, which is an admin alert (Slack/Discord
+    style), not this shop-state callback."""
+
+    base_url: str = ""
+    webhook_secret: str = ""
+    request_timeout_seconds: int = 10
+
+
 class WorkerConfig(BaseModel):
     # How many EventConsumer instances to run concurrently in-process
     # (each with its own consumer_id in the same Redis consumer group) —
@@ -289,6 +304,7 @@ class AppConfig(BaseModel):
     ingest: IngestConfig = Field(default_factory=IngestConfig)
     admin_api: AdminApiConfig = Field(default_factory=AdminApiConfig)
     worker: WorkerConfig = Field(default_factory=WorkerConfig)
+    shop_integration: ShopIntegrationConfig = Field(default_factory=ShopIntegrationConfig)
 
 
 def _config_path() -> Path:

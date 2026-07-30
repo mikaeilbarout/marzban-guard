@@ -9,7 +9,11 @@ suspension → disable → permanent blacklist — all through the same Marzban 
 your shop site already uses to provision accounts.
 
 This is a **separate system** from your customer-facing shop/dashboard. It only ever
-*restricts* an existing Marzban account; it never creates, renews, or deletes one.
+*restricts* an existing Marzban account; it never creates, renews, or deletes one. The
+two systems share no database and don't call each other's internal APIs — the only
+connection is an optional one-way callback (`shop_integration.*`) so the shop's own
+ban flag/customer notice stays in sync whenever marzban-guard changes an account's
+status. See `docs/ARCHITECTURE.md#shop-integration-keeping-the-storefront-in-sync`.
 
 See:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the pieces fit together, the

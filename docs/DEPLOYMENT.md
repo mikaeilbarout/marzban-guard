@@ -67,6 +67,18 @@ docker compose cp GeoLite2-Country.mmdb api:/data/GeoLite2-Country.mmdb
 Restart `api` and `worker` afterward. Without it, `geoip.enabled` should be set
 to `false` (or just leave it — lookups fail soft and log a warning once).
 
+### Shop integration (optional)
+
+If you run a customer-facing shop (e.g. Freemiga) in front of the same
+Marzban panel, set `SHOP_BASE_URL` and `SHOP_WEBHOOK_SECRET` in `.env` so
+the shop's own ban flag/customer notice stays in sync whenever
+marzban-guard suspends, disables, blacklists, or reinstates an account —
+see [`ARCHITECTURE.md#shop-integration`](ARCHITECTURE.md#shop-integration-keeping-the-storefront-in-sync).
+`SHOP_WEBHOOK_SECRET` must match the shop's own
+`MARZBAN_GUARD_WEBHOOK_SECRET`. Leave `SHOP_BASE_URL` empty (the default)
+to skip this entirely — marzban-guard still enforces restrictions
+directly against Marzban either way.
+
 ## 2. Node-side collector (repeat for every Xray/Marzban node)
 
 The collector is stdlib-only Python — no pip install, no venv required.
