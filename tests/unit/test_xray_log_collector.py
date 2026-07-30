@@ -51,6 +51,14 @@ def test_parse_line_strips_email_suffix_when_configured():
     assert event["username"] == "alice"
 
 
+def test_parse_line_strips_email_prefix_when_configured():
+    # Stock Marzban's own xray_config generator tags clients as
+    # "{proxy_id}.{username}" — the prefix variant, not the suffix one.
+    line = "2024/01/15 10:23:45 from 10.20.0.5:53211 accepted tcp:8.8.8.8:443 [in -> out] email: 1.alice"
+    event = parse_line(line, node_id="node-1", email_strip_suffix_at="", email_strip_prefix_at=".")
+    assert event["username"] == "alice"
+
+
 def test_parse_line_returns_none_for_unrecognized_format():
     assert parse_line("this is not a log line at all", node_id="n", email_strip_suffix_at="") is None
     assert parse_line("", node_id="n", email_strip_suffix_at="") is None

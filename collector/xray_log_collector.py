@@ -62,6 +62,11 @@ class CollectorConfig:
     batch_interval_seconds: float = 2.0
     max_buffered_events: int = 50_000
     email_strip_suffix_at: str = ""  # e.g. "." if Marzban's email tag is "username.uuid"
+    # e.g. "." if Marzban's email tag is "{proxy_id}.{username}" — stock
+    # Marzban's own xray_config generator uses exactly this convention, so
+    # most real deployments need this rather than (or in addition to) the
+    # suffix variant above.
+    email_strip_prefix_at: str = ""
     poll_interval_seconds: float = 0.5
     request_timeout_seconds: float = 10.0
 
@@ -81,6 +86,7 @@ class CollectorConfig:
             batch_interval_seconds=float(os.environ.get("MG_BATCH_INTERVAL_SECONDS", "2")),
             max_buffered_events=int(os.environ.get("MG_MAX_BUFFERED_EVENTS", "50000")),
             email_strip_suffix_at=os.environ.get("MG_EMAIL_STRIP_SUFFIX_AT", ""),
+            email_strip_prefix_at=os.environ.get("MG_EMAIL_STRIP_PREFIX_AT", ""),
         )
 
 
@@ -160,12 +166,16 @@ class LogTailer:
         time.sleep(self._poll_interval)
 
 
-def parse_line(line: str, node_id: str, email_strip_suffix_at: str) -> dict | None:
+def parse_line(
+    line: str, node_id: str, email_strip_suffix_at: str, email_strip_prefix_at: str = ""
+) -> dict | None:
     match = LOG_LINE_RE.match(line.strip())
     if not match:
         return None
 
     email = match.group("email")
+    if email_strip_prefix_at and email_strip_prefix_at in email:
+        email = email.split(email_strip_prefix_at, 1)[-1]
     if email_strip_suffix_at and email_strip_suffix_at in email:
         email = email.split(email_strip_suffix_at, 1)[0]
 
@@ -238,7 +248,7 @@ def run(cfg: CollectorConfig) -> None:
     while True:
         try:
             for line in tailer.poll_lines():
-                event = parse_line(line, cfg.node_id, cfg.email_strip_suffix_at)
+                event = parse_line(line, cfg.node_id, cfg.email_strip_suffix_at, cfg.email_strip_prefix_at)
                 if event:
                     buffer.add(event)
 
