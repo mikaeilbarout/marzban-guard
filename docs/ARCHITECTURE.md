@@ -123,7 +123,31 @@ Shipped detectors: `ConnectionRateDetector`, `PortScanDetector` (concentrated
 port probing on few hosts), `DestinationFanoutDetector` (broad IP/port fanout
 regardless of concentration — deliberately separate from port-scan so a P2P
 client touching many peers on many ports doesn't get misclassified as scanning),
-`SpamDetector` (heuristic SMTP-fanout), `FailedConnectionDetector`.
+`DeviceLimitDetector` (account shared across more distinct client IPs than its
+plan allows — see below), `SpamDetector` (heuristic SMTP-fanout),
+`FailedConnectionDetector`.
+
+### Device limit ("max N devices per account")
+
+`security.device_limit` (default `max_devices: 2`, per-user overridable via
+`per_user_overrides.<username>.max_devices`). Mechanically this is just another
+`DestinationFanoutTracker` instance (`services/rate_limiter.py`) keyed by
+**client** IP instead of destination IP, over a longer window
+(`window_minutes`, default 15) meant to approximate "currently active devices"
+rather than a short abuse-detection burst window.
+
+Two honesty notes, expanded in `docs/DATA_SOURCES.md`:
+- **"Device" means "distinct client IP"** — there's no real device fingerprint
+  available. Several real devices behind one NAT/shared IP undercount as one;
+  a single device whose IP rotates mid-session can overcount as several.
+- **Enforcement, not prevention.** Like everything else in this system, this is
+  detect-and-react, not a real-time connection-admission gate — a violation is
+  caught shortly after the fact (through the same ingest → detect → score →
+  mitigate pipeline) and results in a temporary account suspension (level 3 by
+  default, since `device_limit_exceeded`'s weight matches `thresholds.level_3`
+  exactly — one trigger alone is enough), not an instant per-device kick. There
+  is no way to selectively disconnect just the extra device — Marzban's admin
+  API only supports enabling/disabling the whole account.
 
 ## Observability
 

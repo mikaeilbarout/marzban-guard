@@ -97,6 +97,27 @@ class ConcurrencyEstimateConfig(BaseModel):
     window_seconds: int = 10
 
 
+class DeviceLimitConfig(BaseModel):
+    """Distinct-device enforcement — approximated by counting distinct
+    client IPs seen for a user within a rolling window, since neither
+    Xray's access log nor Marzban's admin API expose a real device
+    fingerprint (see docs/DATA_SOURCES.md). This under-counts when several
+    real devices share one IP (carrier-grade NAT, a home router), and can
+    over-count a single device whose IP rotates mid-session — tune
+    max_devices and window_minutes with that in mind, and treat it as "how
+    many distinct network paths are using this account right now", not a
+    literal device count."""
+
+    enabled: bool = True
+    max_devices: int = 2
+    # How long a client IP keeps "counting" as a currently-active device
+    # after its last connection — long enough that normal reconnects
+    # (network switch, app backgrounding) don't look like a new device,
+    # short enough that someone who's genuinely stopped using a device
+    # drops out of the count reasonably soon.
+    window_minutes: int = 15
+
+
 class SpamDetectionConfig(BaseModel):
     """Heuristic, not deep packet inspection: flags a user relaying to an
     unusually large number of distinct mail-server IPs on mail ports in a
@@ -116,6 +137,10 @@ class ScoringWeights(BaseModel):
     too_many_destination_ports: int = 35
     repeated_suspicious_behavior: int = 80
     failed_connection_burst: int = 30
+    # Matches thresholds.level_3 by default so exceeding the device cap
+    # alone is enough to trigger a temporary suspension immediately,
+    # without waiting on other signals or a repeat offense.
+    device_limit_exceeded: int = 80
 
 
 class ScoringThresholds(BaseModel):
@@ -171,6 +196,7 @@ class PerUserOverride(BaseModel):
     connection_limit_per_minute: int | None = None
     connection_limit_per_hour: int | None = None
     concurrent_limit: int | None = None
+    max_devices: int | None = None
 
 
 class SecurityConfig(BaseModel):
@@ -186,6 +212,7 @@ class SecurityConfig(BaseModel):
     failed_connection_threshold_per_minute: int = 50
     scan_detection: ScanDetectionConfig = Field(default_factory=ScanDetectionConfig)
     concurrency_estimate: ConcurrencyEstimateConfig = Field(default_factory=ConcurrencyEstimateConfig)
+    device_limit: DeviceLimitConfig = Field(default_factory=DeviceLimitConfig)
     spam_detection: SpamDetectionConfig = Field(default_factory=SpamDetectionConfig)
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     mitigation: MitigationConfig = Field(default_factory=MitigationConfig)
@@ -199,6 +226,7 @@ class SecurityConfig(BaseModel):
             connection_limit_per_hour=(override.connection_limit_per_hour if override else None)
             or self.connection_limit_per_hour,
             concurrent_limit=(override.concurrent_limit if override else None) or self.concurrent_limit,
+            max_devices=(override.max_devices if override else None) or self.device_limit.max_devices,
         )
 
 
@@ -206,6 +234,7 @@ class EffectiveLimits(BaseModel):
     connection_limit_per_minute: int
     connection_limit_per_hour: int
     concurrent_limit: int
+    max_devices: int
 
 
 class NotificationsConfig(BaseModel):

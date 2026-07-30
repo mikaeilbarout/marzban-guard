@@ -65,3 +65,10 @@ async def test_rate_limiter_tracks_rejected_separately_from_accepted(redis, secu
     stats = await limiter.record_connection(make_event(username="carol", outcome="rejected"))
     assert stats.rejected_last_minute >= 2
     assert stats.new_connections_last_minute == 0
+
+
+async def test_rate_limiter_counts_distinct_client_devices(redis, security_config):
+    limiter = RateLimiter(redis, security_config)
+    for client_ip in ["10.0.0.1", "10.0.0.2", "10.0.0.1", "10.0.0.3"]:
+        stats = await limiter.record_connection(make_event(username="dana", client_ip=client_ip))
+    assert stats.distinct_client_devices == 3

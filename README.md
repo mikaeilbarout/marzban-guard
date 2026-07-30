@@ -3,8 +3,8 @@
 A production-grade abuse detection & mitigation system for VPN services built on
 [Marzban](https://github.com/Gozargah/Marzban) + Xray-core. It watches connection
 behavior per user, scores it against a pluggable set of detectors (port scanning,
-connection-rate abuse, destination fanout, spam relaying, failed-connection bursts),
-and automatically escalates through logging → admin notification → temporary
+connection-rate abuse, destination fanout, device/concurrent-connection limits,
+spam relaying, failed-connection bursts), and automatically escalates through logging → admin notification → temporary
 suspension → disable → permanent blacklist — all through the same Marzban admin API
 your shop site already uses to provision accounts.
 

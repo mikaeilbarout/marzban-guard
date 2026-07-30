@@ -78,6 +78,26 @@ Used for two things only:
 marzban-guard never calls the *create*, *renew*, or *delete* user endpoints —
 that's the shop site's job, not this system's.
 
+## "Device" limiting is really "distinct client IP" limiting
+
+`DeviceLimitDetector` / `security.device_limit` counts distinct **client** IPs
+per user in a rolling window as a stand-in for "number of devices using this
+account". There is no real device fingerprint (no client cert, no app-level
+device ID) available from either the Xray access log or Marzban's admin API —
+only the source IP:port the node saw the connection arrive from. Concretely:
+
+- Multiple real devices behind one carrier-grade NAT or home router share one
+  public IP and will **undercount** as a single "device".
+- One real device on a network that rotates IPs mid-session (some mobile
+  carriers, some residential ISPs) can **overcount** as multiple "devices".
+
+This is a reasonable, honest proxy for the common case (someone sharing
+account credentials with friends/family on genuinely different networks), but
+it is not a cryptographically or biometrically verified device count — set
+`max_devices` with that margin of error in mind, and treat a triggered
+mitigation as "unusually many distinct network paths used this account
+recently", not a courtroom-grade claim about device count.
+
 ## GeoIP
 
 Destination-country enrichment (`services/geoip.py`) uses a local MaxMind

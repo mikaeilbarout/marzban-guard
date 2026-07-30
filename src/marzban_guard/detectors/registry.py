@@ -10,6 +10,7 @@ from marzban_guard.config import SecurityConfig
 from marzban_guard.detectors.base import BaseDetector, DetectorResult
 from marzban_guard.detectors.connection_rate import ConnectionRateDetector
 from marzban_guard.detectors.destination_fanout import DestinationFanoutDetector
+from marzban_guard.detectors.device_limit import DeviceLimitDetector
 from marzban_guard.detectors.failed_connections import FailedConnectionDetector
 from marzban_guard.detectors.port_scan import PortScanDetector
 from marzban_guard.detectors.spam import SpamDetector
@@ -20,6 +21,7 @@ _DETECTOR_CLASSES: list[type[BaseDetector]] = [
     ConnectionRateDetector,
     PortScanDetector,
     DestinationFanoutDetector,
+    DeviceLimitDetector,
     SpamDetector,
     FailedConnectionDetector,
 ]

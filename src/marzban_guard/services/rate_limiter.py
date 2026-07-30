@@ -11,11 +11,23 @@ Two building blocks:
     two-fixed-bucket weighted-average approximation.
   - DestinationFanoutTracker — distinct destination IPs/ports contacted in
     a tumbling window, capped so one user can't grow a Redis set without
-    bound (see ScanDetectionConfig.max_tracked_destinations).
+    bound (see ScanDetectionConfig.max_tracked_destinations). Also reused
+    for distinct CLIENT IPs (device-limit enforcement, see
+    DeviceLimitConfig) — same mechanism, different key/window.
 
-See docs/DATA_SOURCES.md for why "concurrent connections" and "session
-duration" are estimates rather than exact counts — Xray's access log has
-no connection-close event to correlate against.
+See docs/DATA_SOURCES.md for why "concurrent connections", "session
+duration", and "distinct devices" are all estimates rather than exact
+counts — Xray's access log has no connection-close event to correlate
+against, and no real device fingerprint exists to count against either.
+
+Note on the tumbling window: DestinationFanoutTracker resets completely
+at each window boundary rather than sliding continuously. For scan
+detection that's fine (scans are short bursts well inside one window).
+For device-limit tracking it means a device that happens not to open any
+new connection in the first moments of a fresh window is briefly absent
+from the count until its next connection — in practice a non-issue, since
+normal VPN traffic opens new connections continuously, but worth knowing
+if you see a device limit not fire exactly the instant a window rolls over.
 """
 from __future__ import annotations
 
@@ -42,6 +54,7 @@ class ConnectionStats:
     destination_ip_cap_hit: bool
     destination_port_cap_hit: bool
     distinct_smtp_destination_ips: int
+    distinct_client_devices: int
 
 
 class SlidingWindowCounter:
@@ -156,6 +169,17 @@ class RateLimiter:
         smtp_tracker = DestinationFanoutTracker(
             self._redis, f"{_KEY_PREFIX}:smtpdest:{user}", scan_cfg.window_seconds, scan_cfg.max_tracked_destinations
         )
+        device_cfg = self._cfg.device_limit
+        device_tracker = DestinationFanoutTracker(
+            self._redis,
+            f"{_KEY_PREFIX}:devices:{user}",
+            device_cfg.window_minutes * 60,
+            # A device count needs its own cap distinct from destination
+            # fanout — reusing max_tracked_destinations here would be
+            # needlessly huge for something that should never legitimately
+            # exceed a handful.
+            max(device_cfg.max_devices * 10, 50),
+        )
 
         if event.outcome == Outcome.rejected:
             await rejected_counter.increment(now)
@@ -166,6 +190,10 @@ class RateLimiter:
 
         ip_count, ip_cap_hit = await ip_tracker.add_and_count(event.destination_ip, now)
         port_count, port_cap_hit = await port_tracker.add_and_count(str(event.destination_port), now)
+
+        device_count = 0
+        if device_cfg.enabled:
+            device_count, _ = await device_tracker.add_and_count(event.client_ip, now)
 
         spam_cfg = self._cfg.spam_detection
         if spam_cfg.enabled and event.outcome != Outcome.rejected and event.destination_port in spam_cfg.ports:
@@ -183,4 +211,5 @@ class RateLimiter:
             destination_ip_cap_hit=ip_cap_hit,
             destination_port_cap_hit=port_cap_hit,
             distinct_smtp_destination_ips=smtp_ip_count,
+            distinct_client_devices=device_count,
         )
