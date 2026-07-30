@@ -1,15 +1,22 @@
-# Opt-in overlay for exposing Grafana through a host that already runs its
-# own nginx fronting other sites (mirrors the same pattern used in the
-# Freemiga shop's docker-compose.shared-nginx.yml). NOT auto-loaded by plain
-# `docker compose` — pass it explicitly:
+# Opt-in overlay for a host that already runs its own nginx fronting other
+# sites, and/or runs the Freemiga shop alongside this service. NOT
+# auto-loaded by plain `docker compose` — pass it explicitly:
 #
 #   docker compose -f docker-compose.yml -f docker-compose.shared-nginx.yml up -d
 #
-# Attaches grafana to the pre-existing `web_shared` docker network under a
-# stable alias so that external nginx's proxy_pass can reach it by name
-# instead of an IP that changes on every recreate. The web_shared network
-# itself must already exist and the external nginx container must already
-# be connected to it (see the Freemiga repo's README for how that's set up).
+# Three attachments to the pre-existing `web_shared` external network:
+#   - grafana: stable alias so external nginx's proxy_pass can reach it by
+#     name instead of an IP that changes on every recreate.
+#   - api: stable alias so the Freemiga shop's own container (also on
+#     web_shared, see that repo's same-named overlay) can reach
+#     PUT /api/v1/admin/users/{username}/device-limit directly over the
+#     internal network instead of the host-published port.
+#   - worker: no alias needed (it only ever calls out to Freemiga's
+#     `freemiga_app` alias, via shop_integration.base_url in config.yaml)
+#     — just needs network membership to resolve that name.
+#
+# web_shared itself must already exist and the external nginx container
+# must already be connected to it (see the Freemiga repo's README).
 services:
   grafana:
     environment:
@@ -19,6 +26,18 @@ services:
       web_shared:
         aliases:
           - marzban_guard_grafana
+
+  api:
+    networks:
+      default:
+      web_shared:
+        aliases:
+          - marzban_guard_api
+
+  worker:
+    networks:
+      default:
+      web_shared:
 
 networks:
   web_shared:

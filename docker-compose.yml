@@ -82,7 +82,10 @@ services:
       - ./config/config.yaml:/app/config/config.yaml:ro
       - geoip_data:/data:ro
     ports:
-      - "9100:9100"   # worker's own /metrics — separate process from the API's
+      # Loopback-only: this is a raw Prometheus /metrics endpoint, not meant
+      # to be internet-facing. Front it with your own reverse proxy + auth
+      # if you need to reach it from elsewhere (see docs/DEPLOYMENT.md).
+      - "127.0.0.1:9100:9100"   # worker's own /metrics — separate process from the API's
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,7 +101,8 @@ services:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     ports:
-      - "9090:9090"
+      # Loopback-only — see the worker service's port comment above.
+      - "127.0.0.1:9090:9090"
     depends_on:
       - api
 
@@ -114,7 +118,11 @@ services:
       - ./docker/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "3000:3000"
+      # Loopback-only by default (reach it via `ssh -L 3000:127.0.0.1:3000`,
+      # or expose it properly through your own reverse proxy + TLS — see
+      # docker-compose.shared-nginx.yml for the pattern used when this host
+      # already runs an external nginx fronting other sites).
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
 

@@ -15,6 +15,17 @@ cp .env.example .env
 cp config/config.example.yaml config/config.yaml
 ```
 
+**If this central service runs on the same host as Marzban itself** (common
+for small deployments): Marzban's own panel typically runs with
+`network_mode: host` on port 8000 — the exact same host port `api` publishes
+by default. Docker will only bind whichever one starts first; the other
+fails with "address already in use". Either edit the `api` service's `ports:`
+in `docker-compose.yml` to publish a different host port (e.g.
+`"127.0.0.1:8010:8000"`, container-internal port stays 8000) or, better,
+firewall/reverse-proxy it instead of publishing directly. This has no
+relation to marzban-guard's own use of port 8000 *inside* its container —
+only the host-side publish conflicts.
+
 Edit `.env`:
 - `POSTGRES_PASSWORD` — anything random.
 - `MARZBAN_ADMIN_USERNAME` / `MARZBAN_ADMIN_PASSWORD` — a Marzban admin account
