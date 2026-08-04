@@ -16,14 +16,17 @@ from marzban_guard.services.scoring import ScoringOutcome
 pytestmark = pytest.mark.asyncio
 
 
-def _service(auto_block_enabled: bool | None = None):
+def _service(auto_block_enabled: bool | None = None, auto_block_min_level: int | None = None):
     cfg = get_config().security
-    if auto_block_enabled is not None:
+    if auto_block_enabled is not None or auto_block_min_level is not None:
         # get_config() is a process-wide @lru_cache singleton — copy
-        # before overriding so a test tweaking auto_block.enabled can't
+        # before overriding so a test tweaking auto_block fields can't
         # leak that change into every other test sharing the same object.
         cfg = cfg.model_copy(deep=True)
-        cfg.mitigation.auto_block.enabled = auto_block_enabled
+        if auto_block_enabled is not None:
+            cfg.mitigation.auto_block.enabled = auto_block_enabled
+        if auto_block_min_level is not None:
+            cfg.mitigation.auto_block.min_level = auto_block_min_level
     marzban = AsyncMock()
     notifier = AsyncMock()
     shop_notifier = AsyncMock()
@@ -219,5 +222,70 @@ async def test_real_deactivation_alert_bypasses_notify_cooldown(db_session):
     await service.apply(db_session, scan_outcome)
 
     assert service._notifier.notify.await_count == 2
+    message = service._notifier.notify.call_args[0][0]
+    assert "BLACKLISTED" in message
+
+
+async def test_levels_below_min_level_notify_without_acting(db_session):
+    """auto_block.min_level=5: levels 3 and 4 must only inform the admin —
+    the account stays untouched, nothing reaches Marzban or the shop."""
+    service, marzban, shop_notifier = _service(auto_block_enabled=True, auto_block_min_level=5)
+    user = GuardUser(username="nina", status=UserStatus.active)
+    db_session.add(user)
+    await db_session.flush()
+
+    level3_result = DetectorResult(detector="port_scan", triggered=True, score=90, reason="scanning a bit")
+    level3_outcome = ScoringOutcome(user=user, score=90, level=3, triggered=[level3_result], repeat_bonus_applied=False)
+    await service.apply(db_session, level3_outcome)
+
+    marzban.set_user_status.assert_not_awaited()
+    shop_notifier.notify_status.assert_not_awaited()
+    assert user.status == UserStatus.active
+    assert service._notifier.notify.await_count == 1
+    message = service._notifier.notify.call_args[0][0]
+    assert "nina" in message
+    assert "level 3" in message
+    assert "Flagged" in message
+
+    # A second flag (level 4) moments later is a routine "still elevated"
+    # ping like any other — subject to the normal notify_cooldown_seconds,
+    # not a bypass, since the account still isn't actually being touched.
+    level4_result = DetectorResult(detector="port_scan", triggered=True, score=130, reason="scanning more")
+    level4_outcome = ScoringOutcome(
+        user=user, score=130, level=4, triggered=[level4_result], repeat_bonus_applied=False
+    )
+    await service.apply(db_session, level4_outcome)
+
+    marzban.set_user_status.assert_not_awaited()
+    assert user.status == UserStatus.active
+    assert service._notifier.notify.await_count == 1  # throttled by notify_cooldown_seconds
+
+
+async def test_min_level_still_auto_blocks_once_reached(db_session):
+    """The other half of min_level: once the score actually reaches
+    min_level, it acts for real — and that alert bypasses the cooldown
+    like any real deactivation, even right after a throttled level-4 flag."""
+    service, marzban, shop_notifier = _service(auto_block_enabled=True, auto_block_min_level=5)
+    user = GuardUser(username="nina", status=UserStatus.active)
+    db_session.add(user)
+    await db_session.flush()
+
+    level4_result = DetectorResult(detector="port_scan", triggered=True, score=130, reason="scanning more")
+    level4_outcome = ScoringOutcome(
+        user=user, score=130, level=4, triggered=[level4_result], repeat_bonus_applied=False
+    )
+    await service.apply(db_session, level4_outcome)
+    assert service._notifier.notify.await_count == 1
+
+    level5_result = DetectorResult(detector="port_scan", triggered=True, score=200, reason="scanning a lot")
+    level5_outcome = ScoringOutcome(
+        user=user, score=200, level=5, triggered=[level5_result], repeat_bonus_applied=False
+    )
+    await service.apply(db_session, level5_outcome)
+
+    marzban.set_user_status.assert_awaited_once_with("nina", active=False)
+    shop_notifier.notify_status.assert_awaited_once_with("nina", banned=True, reason="port_scan: scanning a lot")
+    assert user.status == UserStatus.blacklisted
+    assert service._notifier.notify.await_count == 2  # bypassed the cooldown despite the recent level-4 flag
     message = service._notifier.notify.call_args[0][0]
     assert "BLACKLISTED" in message

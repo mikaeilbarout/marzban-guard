@@ -119,6 +119,12 @@ security:
     auto_block:
       enabled: true    # false = dry-run/monitor-only, nothing actually gets suspended
       duration: "1h"   # level-3 (temporary suspend) duration; levels 4/5 need manual review
+      # Lowest level allowed to actually act on Marzban. Levels below this
+      # still notify the admin (cooldown-throttled like any routine flag)
+      # but leave the account untouched. 3 (default) = every level from 3
+      # up acts. 5 = only a blacklist-worthy score auto-acts; levels 3/4
+      # are "just tell me". Must be 3, 4, or 5.
+      min_level: 3
     # An escalation whose ONLY trigger is device_limit (no other detector
     # fired in the same event) never reaches Marzban — it sends the
     # account holder a warning via shop_integration instead. device_limit

@@ -181,6 +181,15 @@ class AutoBlockConfig(BaseModel):
     # this entirely — they require manual admin review, see
     # level_4_requires_manual_reenable below and the blacklist_entries table.
     duration: str = "1h"
+    # The lowest level that's actually allowed to reach Marzban when
+    # enabled is true. Reaching a level below this still notifies the
+    # admin (subject to notify_cooldown_seconds, same as any other
+    # routine flag) and is recorded, but the account is left untouched —
+    # only min_level and above actually suspend/disable/blacklist. E.g.
+    # min_level=5 means levels 3/4 are "just tell me", and only a level-5
+    # (blacklist-worthy) score auto-acts. Default 3 preserves the
+    # original behavior of every level from 3 up auto-acting.
+    min_level: int = Field(3, ge=3, le=5)
 
     @property
     def duration_seconds(self) -> int:

@@ -19,6 +19,12 @@ false, levels 3-5 are logged as "would have escalated" and admin is still
 notified, but nothing is actually sent to Marzban — useful for tuning
 thresholds against real traffic before trusting the system to act.
 
+auto_block.min_level raises the bar for which of those levels actually
+acts: with enabled=true and min_level=5 (say), levels 3/4 only notify —
+the account stays untouched — and level 5 is the first one to actually
+reach Marzban. Default min_level=3 keeps every level from 3 up acting,
+i.e. the original behavior.
+
 Every admin Telegram/webhook alert (see Notifier) spells out account,
 score, the specific action taken this round (suspended/disabled/
 blacklisted/dry-run/device-limit-warned/flagged-only), and the detector
@@ -118,16 +124,7 @@ class MitigationService:
             is_escalation = False  # already handled — don't also fall through to the normal path below
 
         if is_escalation:
-            if self._cfg.auto_block.enabled:
-                await self._escalate(session, user, level, target_status, reason, now)
-                real_deactivation = True
-                if target_status == UserStatus.suspended:
-                    action_summary = f"🔴 SUSPENDED — auto-reinstated in {self._cfg.auto_block.duration}"
-                elif target_status == UserStatus.disabled:
-                    action_summary = "🔴 DISABLED — stays off until an admin manually re-enables it"
-                else:
-                    action_summary = "🔴 BLACKLISTED — permanent, pending manual review"
-            else:
+            if not self._cfg.auto_block.enabled:
                 logger.warning(
                     "event_type=mitigation_dry_run",
                     username=user.username,
@@ -137,6 +134,24 @@ class MitigationService:
                 )
                 await action_repo.add(session, user.username, level, "dry_run", reason)
                 action_summary = f"🟡 DRY-RUN — would have been {target_status.value} (auto_block is off)"
+            elif level >= self._cfg.auto_block.min_level:
+                await self._escalate(session, user, level, target_status, reason, now)
+                real_deactivation = True
+                if target_status == UserStatus.suspended:
+                    action_summary = f"🔴 SUSPENDED — auto-reinstated in {self._cfg.auto_block.duration}"
+                elif target_status == UserStatus.disabled:
+                    action_summary = "🔴 DISABLED — stays off until an admin manually re-enables it"
+                else:
+                    action_summary = "🔴 BLACKLISTED — permanent, pending manual review"
+            else:
+                # Below auto_block.min_level: policy says "tell me, don't
+                # act yet" — account stays untouched, this round is just a
+                # (cooldown-throttled, like any routine flag) heads-up.
+                await action_repo.add(session, user.username, level, "flagged", reason)
+                action_summary = (
+                    f"🟡 Flagged — level {level} reached, no action taken "
+                    f"(auto-block only applies from level {self._cfg.auto_block.min_level}+)"
+                )
         elif action_summary is None:
             action_summary = "ℹ️ Flagged only — no status change at this level"
 
