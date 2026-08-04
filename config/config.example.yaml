@@ -115,6 +115,16 @@ security:
     auto_block:
       enabled: true    # false = dry-run/monitor-only, nothing actually gets suspended
       duration: "1h"   # level-3 (temporary suspend) duration; levels 4/5 need manual review
+    # An escalation whose ONLY trigger is device_limit (no other detector
+    # fired in the same event) never reaches Marzban — it sends the
+    # account holder a warning via shop_integration instead. device_limit
+    # alone is "used more devices than this plan allows", not a malicious
+    # pattern, and normal network roaming can trip it; device_limit
+    # firing ALONGSIDE another detector still escalates normally. false
+    # restores the old behavior (device_limit escalates like every other
+    # detector).
+    device_limit_warn_only: true
+    device_limit_warn_cooldown_seconds: 3600   # one warning per hour per user, not one per connection
 
   # Per-user overrides — merged on top of the global security.* values above.
   per_user_overrides: {}

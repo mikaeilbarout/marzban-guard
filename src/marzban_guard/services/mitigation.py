@@ -87,6 +87,16 @@ class MitigationService:
         target_status = _LEVEL_STATUS.get(level)  # None for level 2 — notify-only, no status change
         is_escalation = target_status is not None and _STATUS_SEVERITY[target_status] > _STATUS_SEVERITY[user.status]
 
+        # device_limit-only escalations are a policy-allowance signal, not
+        # a malicious-pattern one — see MitigationConfig.device_limit_warn_only's
+        # docstring. If any OTHER detector triggered alongside it this
+        # round, that's a real abuse signal and this stays a normal
+        # escalation.
+        device_limit_only = bool(outcome.triggered) and all(r.detector == "device_limit" for r in outcome.triggered)
+        if is_escalation and self._cfg.device_limit_warn_only and device_limit_only:
+            await self._warn_device_limit(session, user, reason, now)
+            is_escalation = False  # already handled — don't also fall through to the normal path below
+
         if is_escalation:
             if self._cfg.auto_block.enabled:
                 await self._escalate(session, user, level, target_status, reason, now)
@@ -131,6 +141,18 @@ class MitigationService:
             level=level,
             expires_at=expires_at.isoformat() if expires_at else None,
         )
+
+    async def _warn_device_limit(self, session: AsyncSession, user: GuardUser, reason: str, now: datetime) -> None:
+        """The soft alternative to _escalate() for a device_limit-only
+        trigger: no Marzban call, no local status change — just a
+        cooldown-limited notice to the shop so the account holder finds
+        out, without their access being touched at all."""
+        last = await action_repo.last_action(session, user.username, "device_limit_warn")
+        if last and (now - last.created_at).total_seconds() < self._cfg.device_limit_warn_cooldown_seconds:
+            return
+        await action_repo.add(session, user.username, 0, "device_limit_warn", reason)
+        await self._shop_notifier.notify_device_limit_warning(user.username, reason)
+        logger.info("event_type=device_limit_warned", username=user.username)
 
     async def _should_notify(self, session: AsyncSession, username: str, now: datetime) -> bool:
         last = await action_repo.last_action(session, username, "notify_admin")

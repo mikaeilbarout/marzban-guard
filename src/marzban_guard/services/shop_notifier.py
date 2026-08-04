@@ -41,3 +41,26 @@ class ShopNotifier:
                     )
         except Exception:
             logger.exception("event_type=shop_notify_error", username=username)
+
+    async def notify_device_limit_warning(self, username: str, reason: str) -> None:
+        """Distinct from notify_status — this never changes (or implies a
+        change to) the account's access; it's purely "tell the account
+        holder they're near/over their device allowance" so the shop can
+        surface it in the customer's own dashboard/Telegram, without
+        Marzban having touched their status at all. See
+        MitigationConfig.device_limit_warn_only."""
+        if not self._cfg.base_url:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=self._cfg.request_timeout_seconds) as client:
+                resp = await client.post(
+                    f"{self._cfg.base_url}/api/integrations/marzban-guard/device-limit-warning",
+                    json={"username": username, "reason": reason},
+                    headers={"Authorization": f"Bearer {self._cfg.webhook_secret}"},
+                )
+                if resp.status_code >= 300:
+                    logger.warning(
+                        "event_type=shop_notify_failed", username=username, status=resp.status_code
+                    )
+        except Exception:
+            logger.exception("event_type=shop_notify_error", username=username)

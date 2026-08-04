@@ -190,6 +190,24 @@ class MitigationConfig(BaseModel):
     # while their score stays in the level-2 band, so a sustained abuse
     # burst sends one alert, not one per connection.
     notify_cooldown_seconds: int = 900
+    # device_limit is a policy-allowance signal ("using more devices than
+    # this plan permits"), not a malicious-pattern signal like a port scan
+    # or spam relay — going over by a little is routinely just normal
+    # roaming (Wi-Fi/cellular handoff, a rotating carrier IP; see
+    # docs/DATA_SOURCES.md's "Device limiting is really distinct client IP
+    # limiting"). When true (the default), an escalation whose triggered
+    # set is device_limit alone skips the Marzban status change entirely
+    # and sends the account holder a warning instead (see
+    # ShopNotifier.notify_device_limit_warning) — never a suspend/disable/
+    # blacklist. An event where device_limit fires ALONGSIDE another
+    # detector (a real abuse signal) still escalates normally; this only
+    # softens the "device_limit was the sole reason" case.
+    device_limit_warn_only: bool = True
+    # Minimum gap between repeated device-limit warnings for the same
+    # user, so someone sustained over their limit gets one notice, not
+    # one per connection. Deliberately its own knob rather than reusing
+    # notify_cooldown_seconds — that one is for the admin alert channel.
+    device_limit_warn_cooldown_seconds: int = 3600
 
 
 class PerUserOverride(BaseModel):
