@@ -26,10 +26,14 @@ class DeviceLimitDetector(BaseDetector):
     this as an exact device count.
 
     Weighted at scoring.weights.device_limit_exceeded, which defaults to
-    exactly thresholds.level_3 — one trigger alone is enough to
-    temporarily suspend the account (forcing a cool-down) without waiting
-    on other signals, since "too many devices" is a clear-cut policy
-    violation rather than a fuzzy abuse heuristic."""
+    exactly thresholds.level_3 — one trigger alone is enough to reach
+    that escalation level without waiting on other signals, since "too
+    many devices" is a clear-cut policy violation rather than a fuzzy
+    abuse heuristic. What actually happens at that level, though, is
+    softened by MitigationConfig.device_limit_warn_only (default true):
+    an escalation whose ONLY trigger is device_limit warns the account
+    holder instead of suspending them — see services/mitigation.py. Firing
+    alongside another detector in the same event is unaffected."""
 
     name = "device_limit"
 

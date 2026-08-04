@@ -71,7 +71,11 @@ security:
   device_limit:
     enabled: true
     max_devices: 2
-    window_minutes: 15
+    # Sliding window (continuously pruned, not a fixed bucket) for "how
+    # long since this client IP's last connection before it stops
+    # counting as an active device" — see DeviceLimitConfig's docstring
+    # and services/rate_limiter.py's LiveSetTracker.
+    window_minutes: 5
 
   # Heuristic spam-relay detection: flags relaying to an unusually large
   # number of distinct mail-server IPs on mail ports in a short window.

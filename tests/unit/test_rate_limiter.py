@@ -4,6 +4,7 @@ import pytest
 
 from marzban_guard.services.rate_limiter import (
     DestinationFanoutTracker,
+    LiveSetTracker,
     RateLimiter,
     SlidingWindowCounter,
     get_device_limit_override,
@@ -100,3 +101,66 @@ async def test_rate_limiter_counts_distinct_client_devices(redis, security_confi
     for client_ip in ["10.0.0.1", "10.0.0.2", "10.0.0.1", "10.0.0.3"]:
         stats = await limiter.record_connection(make_event(username="dana", client_ip=client_ip))
     assert stats.distinct_client_devices == 3
+
+
+async def test_live_set_tracker_counts_distinct_values(redis):
+    tracker = LiveSetTracker(redis, "test:live", window_seconds=300, max_members=100)
+    now = 1_700_000_000.0
+    for ip in ["1.1.1.1", "2.2.2.2", "1.1.1.1", "3.3.3.3"]:
+        count, cap_hit = await tracker.add_and_count(ip, now)
+    assert count == 3
+    assert cap_hit is False
+
+
+async def test_live_set_tracker_saturates_at_cap(redis):
+    tracker = LiveSetTracker(redis, "test:live-cap", window_seconds=300, max_members=3)
+    now = 1_700_000_000.0
+    results = []
+    for i in range(10):
+        results.append(await tracker.add_and_count(f"10.0.0.{i}", now))
+    assert all(count <= 3 for count, _ in results)
+    assert results[-1] == (3, True)
+
+
+async def test_live_set_tracker_prunes_members_older_than_window(redis):
+    """The behavior this tracker exists for: a member seen once, then
+    nothing further from it, drops out of the count once the window has
+    elapsed — continuously, not just at a fixed bucket boundary the way
+    DestinationFanoutTracker works. This is what makes a short
+    window_minutes actually mean "currently active" for device-limit
+    tracking instead of "was active sometime in this bucket"."""
+    tracker = LiveSetTracker(redis, "test:live-prune", window_seconds=300, max_members=100)
+    t0 = 1_700_000_000.0
+
+    count, _ = await tracker.add_and_count("1.1.1.1", t0)
+    assert count == 1
+
+    # A second device shows up 250s later — both still within 300s of now.
+    count, _ = await tracker.add_and_count("2.2.2.2", t0 + 250)
+    assert count == 2
+
+    # 400s after t0: 1.1.1.1's last (and only) activity is now 400s old —
+    # past the 300s window, so it must have aged out. 2.2.2.2's last
+    # activity is only 150s old — still well within its own window.
+    count, _ = await tracker.add_and_count("3.3.3.3", t0 + 400)
+    assert count == 2  # 2.2.2.2 (still active) + 3.3.3.3 (just added)
+
+
+async def test_live_set_tracker_reconnect_refreshes_instead_of_double_counting(redis):
+    """A device that keeps reconnecting stays counted once, and each
+    reconnect pushes its expiry further out — it never ages out as long
+    as it keeps being seen."""
+    tracker = LiveSetTracker(redis, "test:live-refresh", window_seconds=300, max_members=100)
+    t0 = 1_700_000_000.0
+
+    await tracker.add_and_count("1.1.1.1", t0)
+    # Reconnects just inside the window, repeatedly — should refresh, not
+    # add a second member.
+    count, _ = await tracker.add_and_count("1.1.1.1", t0 + 200)
+    assert count == 1
+    count, _ = await tracker.add_and_count("1.1.1.1", t0 + 400)
+    assert count == 1
+
+    # Confirmed still alive well past the *original* window from t0,
+    # because its most recent activity (t0 + 400) refreshed it.
+    assert await tracker.count(t0 + 650) == 1

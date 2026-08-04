@@ -168,6 +168,59 @@ class DestinationFanoutTracker:
         return await self._redis.scard(self._window_key(now))
 
 
+class LiveSetTracker:
+    """Sliding-window "currently active" member count, backed by a Redis
+    sorted set (member -> last-seen timestamp), pruned on every call.
+    Unlike DestinationFanoutTracker's tumbling window — which resets
+    completely at fixed-size bucket boundaries, so a member absent from
+    the *current* bucket doesn't count even if it was active seconds ago
+    in the *previous* one — this always reflects "seen within the last
+    `window_seconds`, continuously", not "seen in whichever bucket we
+    happen to be in right now". A member reconnecting just refreshes its
+    own timestamp (ZADD is idempotent per member) rather than being
+    double-counted.
+
+    Used specifically for device-limit tracking (see DeviceLimitDetector)
+    because that's the one place a tumbling window's edge behavior is a
+    real problem: Xray's access log has no connection-close event (see
+    docs/DATA_SOURCES.md), so "how many devices are active right now" can
+    only ever be approximated as "how many distinct client IPs had a
+    connection in roughly the last N minutes" — and the shorter that
+    window needs to be to feel like "right now" instead of "sometime
+    recently", the more a tumbling window's boundary effects matter.
+    Scan/fanout detection (DestinationFanoutTracker) doesn't have this
+    problem — a real scan is a short, dense burst well inside one window
+    either way — so it keeps the cheaper tumbling implementation.
+    """
+
+    def __init__(self, redis: Redis, key: str, window_seconds: int, max_members: int):
+        self._redis = redis
+        self._key = key
+        self._window = window_seconds
+        self._max_members = max_members
+
+    async def add_and_count(self, value: str, now: float) -> tuple[int, bool]:
+        cutoff = now - self._window
+        pipe = self._redis.pipeline(transaction=False)
+        pipe.zremrangebyscore(self._key, "-inf", cutoff)
+        pipe.zcard(self._key)
+        _pruned, current_size = await pipe.execute()
+        cap_hit = current_size >= self._max_members
+        if not cap_hit:
+            pipe = self._redis.pipeline(transaction=False)
+            pipe.zadd(self._key, {value: now})
+            pipe.expire(self._key, self._window * 2)
+            pipe.zcard(self._key)
+            _added, _expired, current_size = await pipe.execute()
+        return current_size, cap_hit
+
+    async def count(self, now: float) -> int:
+        """Read-only peek — prunes stale members but doesn't add one."""
+        cutoff = now - self._window
+        await self._redis.zremrangebyscore(self._key, "-inf", cutoff)
+        return await self._redis.zcard(self._key)
+
+
 class RateLimiter:
     """Facade used by the ingestion worker: one `record_connection()` call
     per event, returning the fresh rolling stats detectors need. Building a
@@ -202,9 +255,15 @@ class RateLimiter:
             self._redis, f"{_KEY_PREFIX}:smtpdest:{user}", scan_cfg.window_seconds, scan_cfg.max_tracked_destinations
         )
         device_cfg = self._cfg.device_limit
-        device_tracker = DestinationFanoutTracker(
+        device_tracker = LiveSetTracker(
             self._redis,
-            f"{_KEY_PREFIX}:devices:{user}",
+            # "devices_live", not "devices" — a distinct key namespace
+            # from before this tracker switched from
+            # DestinationFanoutTracker (a Redis SET) to LiveSetTracker (a
+            # Redis ZSET). Reusing the old key would hit a WRONGTYPE error
+            # against any key an old deploy left behind; the old keys just
+            # expire on their own via their existing TTL.
+            f"{_KEY_PREFIX}:devices_live:{user}",
             device_cfg.window_minutes * 60,
             # A device count needs its own cap distinct from destination
             # fanout — reusing max_tracked_destinations here would be

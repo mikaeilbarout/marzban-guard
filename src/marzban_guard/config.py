@@ -99,8 +99,9 @@ class ConcurrencyEstimateConfig(BaseModel):
 
 class DeviceLimitConfig(BaseModel):
     """Distinct-device enforcement — approximated by counting distinct
-    client IPs seen for a user within a rolling window, since neither
-    Xray's access log nor Marzban's admin API expose a real device
+    client IPs *currently* active for a user (a true sliding window, see
+    services/rate_limiter.py's LiveSetTracker — not a fixed bucket), since
+    neither Xray's access log nor Marzban's admin API expose a real device
     fingerprint (see docs/DATA_SOURCES.md). This under-counts when several
     real devices share one IP (carrier-grade NAT, a home router), and can
     over-count a single device whose IP rotates mid-session — tune
@@ -111,11 +112,14 @@ class DeviceLimitConfig(BaseModel):
     enabled: bool = True
     max_devices: int = 2
     # How long a client IP keeps "counting" as a currently-active device
-    # after its last connection — long enough that normal reconnects
-    # (network switch, app backgrounding) don't look like a new device,
-    # short enough that someone who's genuinely stopped using a device
-    # drops out of the count reasonably soon.
-    window_minutes: int = 15
+    # after its last connection, continuously re-evaluated (LiveSetTracker
+    # prunes stale entries on every call, not just at fixed bucket
+    # boundaries) — long enough that normal reconnects (a brief network
+    # handoff, app backgrounding) don't look like a new device, short
+    # enough that someone who's genuinely stopped using a device — or
+    # whose IP just rotated mid-session — drops out of the count quickly
+    # rather than "occupying a slot" long after they've moved on.
+    window_minutes: int = 5
 
 
 class SpamDetectionConfig(BaseModel):
