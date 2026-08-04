@@ -16,8 +16,14 @@ from marzban_guard.services.scoring import ScoringOutcome
 pytestmark = pytest.mark.asyncio
 
 
-def _service():
+def _service(auto_block_enabled: bool | None = None):
     cfg = get_config().security
+    if auto_block_enabled is not None:
+        # get_config() is a process-wide @lru_cache singleton — copy
+        # before overriding so a test tweaking auto_block.enabled can't
+        # leak that change into every other test sharing the same object.
+        cfg = cfg.model_copy(deep=True)
+        cfg.mitigation.auto_block.enabled = auto_block_enabled
     marzban = AsyncMock()
     notifier = AsyncMock()
     shop_notifier = AsyncMock()
@@ -131,7 +137,9 @@ async def test_device_limit_combined_with_another_detector_still_escalates(db_se
     await service.apply(db_session, outcome)
 
     marzban.set_user_status.assert_awaited_once_with("grace", active=False)
-    shop_notifier.notify_status.assert_awaited_once_with("grace", banned=True, reason="device_limit: over device limit; port_scan: scanning")
+    shop_notifier.notify_status.assert_awaited_once_with(
+        "grace", banned=True, reason="device_limit: over device limit; port_scan: scanning"
+    )
     shop_notifier.notify_device_limit_warning.assert_not_awaited()
 
 
@@ -150,3 +158,66 @@ async def test_device_limit_warning_respects_cooldown(db_session):
     await service.apply(db_session, outcome)
 
     shop_notifier.notify_device_limit_warning.assert_awaited_once()
+
+
+async def test_admin_alert_spells_out_account_score_action_and_reason(db_session):
+    """The admin alert must never be a bare score — it has to say whose
+    account, what the score/level was, what action was actually taken,
+    and why, so the admin doesn't have to go look it up."""
+    service, *_ = _service(auto_block_enabled=True)
+    user = GuardUser(username="ivan", status=UserStatus.active)
+    db_session.add(user)
+    await db_session.flush()
+
+    result = DetectorResult(detector="port_scan", triggered=True, score=200, reason="80 ports on 2 hosts")
+    outcome = ScoringOutcome(user=user, score=200, level=5, triggered=[result], repeat_bonus_applied=False)
+
+    await service.apply(db_session, outcome)
+
+    message = service._notifier.notify.call_args[0][0]
+    assert "ivan" in message
+    assert "200" in message
+    assert "level 5" in message
+    assert "BLACKLISTED" in message
+    assert "80 ports on 2 hosts" in message
+
+
+async def test_dry_run_admin_alert_says_dry_run(db_session):
+    service, *_ = _service(auto_block_enabled=False)
+    user = GuardUser(username="judy", status=UserStatus.active)
+    db_session.add(user)
+    await db_session.flush()
+
+    result = DetectorResult(detector="port_scan", triggered=True, score=200, reason="scanning")
+    outcome = ScoringOutcome(user=user, score=200, level=5, triggered=[result], repeat_bonus_applied=False)
+
+    await service.apply(db_session, outcome)
+
+    message = service._notifier.notify.call_args[0][0]
+    assert "DRY-RUN" in message
+
+
+async def test_real_deactivation_alert_bypasses_notify_cooldown(db_session):
+    """A routine level-2 ping can be throttled — an account actually going
+    dark must never be swallowed by the same cooldown, or the admin could
+    miss a real suspension entirely."""
+    service, *_ = _service(auto_block_enabled=True)
+    user = GuardUser(username="karl", status=UserStatus.active)
+    db_session.add(user)
+    await db_session.flush()
+
+    # First, a routine level-2 flag — starts the cooldown clock.
+    flag_result = DetectorResult(detector="connection_rate", triggered=True, score=50, reason="a bit fast")
+    flag_outcome = ScoringOutcome(user=user, score=50, level=2, triggered=[flag_result], repeat_bonus_applied=False)
+    await service.apply(db_session, flag_outcome)
+    assert service._notifier.notify.await_count == 1
+
+    # Moments later (well inside notify_cooldown_seconds), a real
+    # escalation happens — this must still alert, not get throttled.
+    scan_result = DetectorResult(detector="port_scan", triggered=True, score=200, reason="scanning")
+    scan_outcome = ScoringOutcome(user=user, score=250, level=5, triggered=[scan_result], repeat_bonus_applied=False)
+    await service.apply(db_session, scan_outcome)
+
+    assert service._notifier.notify.await_count == 2
+    message = service._notifier.notify.call_args[0][0]
+    assert "BLACKLISTED" in message

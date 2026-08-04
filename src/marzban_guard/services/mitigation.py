@@ -19,6 +19,15 @@ false, levels 3-5 are logged as "would have escalated" and admin is still
 notified, but nothing is actually sent to Marzban — useful for tuning
 thresholds against real traffic before trusting the system to act.
 
+Every admin Telegram/webhook alert (see Notifier) spells out account,
+score, the specific action taken this round (suspended/disabled/
+blacklisted/dry-run/device-limit-warned/flagged-only), and the detector
+reason(s) — never just a bare score. A real status change (an actual
+suspend/disable/blacklist reaching Marzban) always sends that alert,
+bypassing notify_cooldown_seconds entirely — the cooldown only throttles
+repeat pings for a user who's merely still elevated, never the moment an
+account actually goes dark.
+
 Every status change that actually reaches Marzban also fires a best-effort
 callback to the shop site via ShopNotifier (see services/shop_notifier.py)
 — this is the only thing keeping the shop's own ban flag/customer notice
@@ -87,6 +96,16 @@ class MitigationService:
         target_status = _LEVEL_STATUS.get(level)  # None for level 2 — notify-only, no status change
         is_escalation = target_status is not None and _STATUS_SEVERITY[target_status] > _STATUS_SEVERITY[user.status]
 
+        # action_summary is what the admin alert below actually says
+        # happened this round — every branch sets it, so the message
+        # never has to be guessed from level/reason alone.
+        # real_deactivation forces that alert out regardless of
+        # notify_cooldown_seconds: a routine "still elevated" ping can
+        # wait, but the admin must never miss an account actually going
+        # dark — see the docstring on _should_notify.
+        action_summary = None
+        real_deactivation = False
+
         # device_limit-only escalations are a policy-allowance signal, not
         # a malicious-pattern one — see MitigationConfig.device_limit_warn_only's
         # docstring. If any OTHER detector triggered alongside it this
@@ -95,11 +114,19 @@ class MitigationService:
         device_limit_only = bool(outcome.triggered) and all(r.detector == "device_limit" for r in outcome.triggered)
         if is_escalation and self._cfg.device_limit_warn_only and device_limit_only:
             await self._warn_device_limit(session, user, reason, now)
+            action_summary = "⚠️ Customer warned — account untouched (device-limit-only trigger)"
             is_escalation = False  # already handled — don't also fall through to the normal path below
 
         if is_escalation:
             if self._cfg.auto_block.enabled:
                 await self._escalate(session, user, level, target_status, reason, now)
+                real_deactivation = True
+                if target_status == UserStatus.suspended:
+                    action_summary = f"🔴 SUSPENDED — auto-reinstated in {self._cfg.auto_block.duration}"
+                elif target_status == UserStatus.disabled:
+                    action_summary = "🔴 DISABLED — stays off until an admin manually re-enables it"
+                else:
+                    action_summary = "🔴 BLACKLISTED — permanent, pending manual review"
             else:
                 logger.warning(
                     "event_type=mitigation_dry_run",
@@ -109,11 +136,19 @@ class MitigationService:
                     level=level,
                 )
                 await action_repo.add(session, user.username, level, "dry_run", reason)
+                action_summary = f"🟡 DRY-RUN — would have been {target_status.value} (auto_block is off)"
+        elif action_summary is None:
+            action_summary = "ℹ️ Flagged only — no status change at this level"
 
-        if await self._should_notify(session, user.username, now):
+        should_notify = real_deactivation or await self._should_notify(session, user.username, now)
+        if should_notify:
             await action_repo.add(session, user.username, level, "notify_admin", reason)
             await self._notifier.notify(
-                f"🚨 marzban-guard: {user.username} — risk score {outcome.score:.0f} (level {level})\n{reason}"
+                f"🚨 marzban-guard alert\n"
+                f"Account: {user.username}\n"
+                f"Score: {outcome.score:.0f} (level {level})\n"
+                f"Action: {action_summary}\n"
+                f"Reason: {reason}"
             )
 
     async def _escalate(
@@ -155,6 +190,14 @@ class MitigationService:
         logger.info("event_type=device_limit_warned", username=user.username)
 
     async def _should_notify(self, session: AsyncSession, username: str, now: datetime) -> bool:
+        """Throttles routine "still elevated" pings (level 2, dry-run, or
+        a device-limit warning) to at most one per notify_cooldown_seconds
+        per user — without this, a user stuck above a threshold would
+        generate one Telegram message per connection. Only consulted for
+        those routine cases; apply() bypasses this entirely for an actual
+        suspend/disable/blacklist (real_deactivation), since that's
+        exactly the kind of event the cooldown must never be allowed to
+        swallow."""
         last = await action_repo.last_action(session, username, "notify_admin")
         if not last:
             return True
