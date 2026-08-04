@@ -21,21 +21,23 @@ Deliberately does NOT write anything to Postgres for a clean connection
 write-amplification would be wasteful at "thousands of users" scale.
 
 device_limit is the one detector this file treats specially: it's a
-STATE signal ("are you over the limit right now"), not a RATE signal
-like connection_rate/port_scan/spam where retriggering on every single
-connection genuinely means more evidence. Left ungated, an account that
-stays over its device limit scores fresh points on every connection it
-makes — so the penalty ends up tracking how often the account happens to
-reconnect, not how severe or how long the violation actually is. Before
-summing new_points, device_limit is dropped from this round's triggered
-set if it already contributed score within
-security.device_limit.score_cooldown_seconds — see
-_filter_device_limit_cooldown below.
+STATE signal ("how many devices over the limit right now"), not a RATE
+signal like connection_rate/port_scan/spam where retriggering on every
+single connection genuinely means more evidence. Scored plainly, an
+account that stays over its device limit would earn fresh points on
+every connection it makes even though nothing about the violation
+actually changed — so the penalty would track how often the account
+reconnects, not how many devices are actually over. Instead,
+device_limit only ever scores the INCREMENT: how many MORE devices are
+over the limit than the last time device_limit was scored for this
+user (limit=3, a 4th device connecting scores one weight's worth, a 5th
+on top of that scores another — but a 4th device simply reconnecting
+scores nothing further). See _apply_device_limit_delta below.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,26 +94,34 @@ class ScoringEngine:
     def __init__(self, cfg: SecurityConfig):
         self._cfg = cfg
 
-    async def _filter_device_limit_cooldown(
-        self, session: AsyncSession, username: str, now: datetime, triggered: list[DetectorResult]
+    async def _apply_device_limit_delta(
+        self, session: AsyncSession, username: str, triggered: list[DetectorResult]
     ) -> list[DetectorResult]:
-        """Drops a device_limit result from this round if device_limit
-        already contributed score within score_cooldown_seconds — see the
-        module docstring. Every other detector passes through untouched;
-        this only ever removes device_limit, never adds or changes
-        anything else."""
-        cooldown = self._cfg.device_limit.score_cooldown_seconds
-        if cooldown <= 0:
-            return triggered
-
-        filtered = []
+        """Rewrites a device_limit result's score to just the INCREMENT
+        over what's already been scored — see the module docstring. Every
+        other detector passes through untouched; this only ever adjusts
+        (or drops) device_limit's own contribution."""
+        adjusted = []
         for result in triggered:
-            if result.detector == "device_limit":
-                last = await event_repo.last_for_detector(session, username, "device_limit")
-                if last and (now - last.created_at).total_seconds() < cooldown:
-                    continue
-            filtered.append(result)
-        return filtered
+            if result.detector != "device_limit":
+                adjusted.append(result)
+                continue
+
+            current_count = result.details.get("distinct_client_devices", 0)
+            limit = result.details.get("max_devices", 0)
+            current_over = max(0, current_count - limit)
+
+            last = await event_repo.last_for_detector(session, username, "device_limit")
+            last_count = last.details.get("distinct_client_devices", limit) if last else limit
+            last_over = max(0, last_count - limit)
+
+            delta_over = current_over - last_over
+            if delta_over <= 0:
+                continue  # no new device beyond what's already been counted
+
+            weight = self._cfg.scoring.weights.device_limit_exceeded
+            adjusted.append(replace(result, score=delta_over * weight))
+        return adjusted
 
     async def process_event(
         self,
@@ -123,7 +133,7 @@ class ScoringEngine:
             return None
 
         now = event.occurred_at
-        triggered = await self._filter_device_limit_cooldown(session, event.username, now, triggered)
+        triggered = await self._apply_device_limit_delta(session, event.username, triggered)
         if not triggered:
             return None
 

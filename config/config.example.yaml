@@ -76,12 +76,6 @@ security:
     # counting as an active device" — see DeviceLimitConfig's docstring
     # and services/rate_limiter.py's LiveSetTracker.
     window_minutes: 5
-    # How often "still over the device limit" is allowed to add fresh
-    # points to the score, instead of every single connection while the
-    # violation lasts (see DeviceLimitConfig's docstring / services/
-    # scoring.py). 0 disables the gate — score every event, matching the
-    # original behavior.
-    score_cooldown_seconds: 300
 
   # Heuristic spam-relay detection: flags relaying to an unusually large
   # number of distinct mail-server IPs on mail ports in a short window.

@@ -25,15 +25,21 @@ class DeviceLimitDetector(BaseDetector):
     docs/DATA_SOURCES.md and DeviceLimitConfig's docstring before treating
     this as an exact device count.
 
-    Weighted at scoring.weights.device_limit_exceeded, which defaults to
-    exactly thresholds.level_3 — one trigger alone is enough to reach
-    that escalation level without waiting on other signals, since "too
-    many devices" is a clear-cut policy violation rather than a fuzzy
-    abuse heuristic. What actually happens at that level, though, is
-    softened by MitigationConfig.device_limit_warn_only (default true):
-    an escalation whose ONLY trigger is device_limit warns the account
-    holder instead of suspending them — see services/mitigation.py. Firing
-    alongside another detector in the same event is unaffected."""
+    Weighted at scoring.weights.device_limit_exceeded per device over the
+    limit — one device over (the smallest possible violation) is enough to
+    reach exactly thresholds.level_3 without waiting on other signals,
+    since "too many devices" is a clear-cut policy violation rather than a
+    fuzzy abuse heuristic; each additional device on top of that is worth
+    another weight's worth. The score returned here is the raw per-trigger
+    weight — ScoringEngine.process_event rewrites it to only the INCREMENT
+    over what's already been scored for this user, so reconnecting with
+    the same over-limit devices doesn't add anything further (see
+    services/scoring.py's device_limit delta logic). What actually happens
+    once a threshold is crossed, though, is softened by
+    MitigationConfig.device_limit_warn_only (default true): an escalation
+    whose ONLY trigger is device_limit warns the account holder instead of
+    suspending them — see services/mitigation.py. Firing alongside another
+    detector in the same event is unaffected."""
 
     name = "device_limit"
 
