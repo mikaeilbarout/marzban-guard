@@ -17,6 +17,20 @@ async def add(
     return event
 
 
+async def last_for_detector(session: AsyncSession, username: str, detector: str) -> AbuseEvent | None:
+    """Most recent AbuseEvent this specific detector actually scored for
+    this user — used by ScoringEngine's device_limit cooldown gate to tell
+    "still the same ongoing violation, already counted recently" apart
+    from "genuinely due for a fresh score"."""
+    stmt = (
+        select(AbuseEvent)
+        .where(AbuseEvent.username == username, AbuseEvent.detector == detector)
+        .order_by(AbuseEvent.created_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
 async def recent_for_user(session: AsyncSession, username: str, since: datetime, limit: int = 100) -> list[AbuseEvent]:
     stmt = (
         select(AbuseEvent)

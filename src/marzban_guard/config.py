@@ -120,6 +120,21 @@ class DeviceLimitConfig(BaseModel):
     # whose IP just rotated mid-session — drops out of the count quickly
     # rather than "occupying a slot" long after they've moved on.
     window_minutes: int = 5
+    # How often "still over the device limit" is allowed to add FRESH
+    # points to a user's score. device_limit is a STATE signal ("are you
+    # over the limit right now"), unlike connection_rate/port_scan/spam,
+    # which are genuinely RATE signals where more triggers per second is
+    # itself stronger evidence of abuse. Without this, ScoringEngine
+    # re-scored device_limit on every single connection event while the
+    # violation lasted — so the penalty ended up scaling with how often
+    # the account happened to reconnect, not with how severe or how long
+    # the violation actually was. A heavy but otherwise-ordinary user
+    # sitting one device over the limit could rack up score far faster
+    # than a light user in the exact same violation, purely from
+    # connection volume — see services/scoring.py's device_limit
+    # cooldown gate. 0 disables the gate and restores the old
+    # score-every-event behavior.
+    score_cooldown_seconds: int = 300
 
 
 class SpamDetectionConfig(BaseModel):

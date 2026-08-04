@@ -19,6 +19,18 @@ calls for explicitly:
 Deliberately does NOT write anything to Postgres for a clean connection
 (no triggered detectors) — see docs/ARCHITECTURE.md#storage for why that
 write-amplification would be wasteful at "thousands of users" scale.
+
+device_limit is the one detector this file treats specially: it's a
+STATE signal ("are you over the limit right now"), not a RATE signal
+like connection_rate/port_scan/spam where retriggering on every single
+connection genuinely means more evidence. Left ungated, an account that
+stays over its device limit scores fresh points on every connection it
+makes — so the penalty ends up tracking how often the account happens to
+reconnect, not how severe or how long the violation actually is. Before
+summing new_points, device_limit is dropped from this round's triggered
+set if it already contributed score within
+security.device_limit.score_cooldown_seconds — see
+_filter_device_limit_cooldown below.
 """
 from __future__ import annotations
 
@@ -80,6 +92,27 @@ class ScoringEngine:
     def __init__(self, cfg: SecurityConfig):
         self._cfg = cfg
 
+    async def _filter_device_limit_cooldown(
+        self, session: AsyncSession, username: str, now: datetime, triggered: list[DetectorResult]
+    ) -> list[DetectorResult]:
+        """Drops a device_limit result from this round if device_limit
+        already contributed score within score_cooldown_seconds — see the
+        module docstring. Every other detector passes through untouched;
+        this only ever removes device_limit, never adds or changes
+        anything else."""
+        cooldown = self._cfg.device_limit.score_cooldown_seconds
+        if cooldown <= 0:
+            return triggered
+
+        filtered = []
+        for result in triggered:
+            if result.detector == "device_limit":
+                last = await event_repo.last_for_detector(session, username, "device_limit")
+                if last and (now - last.created_at).total_seconds() < cooldown:
+                    continue
+            filtered.append(result)
+        return filtered
+
     async def process_event(
         self,
         session: AsyncSession,
@@ -89,8 +122,12 @@ class ScoringEngine:
         if not triggered:
             return None
 
-        user = await user_repo.get_or_create(session, event.username)
         now = event.occurred_at
+        triggered = await self._filter_device_limit_cooldown(session, event.username, now, triggered)
+        if not triggered:
+            return None
+
+        user = await user_repo.get_or_create(session, event.username)
 
         previous_effective = effective_score(user, now, self._cfg.scoring.decay_half_life_seconds)
         new_points = sum(r.score for r in triggered)

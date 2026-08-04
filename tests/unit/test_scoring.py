@@ -87,6 +87,82 @@ async def test_burst_of_triggers_within_the_same_incident_does_not_compound(db_s
     assert outcome.score == pytest.approx(60 * 10, rel=0.01)
 
 
+async def test_device_limit_does_not_rescore_within_cooldown(db_session):
+    """device_limit is a STATE signal, not a rate signal — unlike
+    test_burst_of_triggers_within_the_same_incident_does_not_compound
+    (port_scan legitimately sums every trigger, burst or not), retriggering
+    on every connection while still over the device limit must not add
+    fresh points each time — it's the same ongoing violation, not new
+    evidence."""
+    cfg = get_config().security
+    engine = ScoringEngine(cfg)
+    result = DetectorResult(detector="device_limit", triggered=True, score=80, reason="over device limit")
+
+    now = datetime.utcnow()
+    first = await engine.process_event(db_session, make_event(username="oscar", occurred_at=now), [result])
+    assert first is not None
+    assert first.score == pytest.approx(80)
+
+    # Moments later, well inside score_cooldown_seconds — same ongoing
+    # violation, already counted. Nothing else triggered this event either,
+    # so there's nothing left to score at all.
+    soon = now + timedelta(seconds=1)
+    second = await engine.process_event(db_session, make_event(username="oscar", occurred_at=soon), [result])
+    assert second is None
+
+
+async def test_device_limit_rescores_after_cooldown_elapses(db_session):
+    cfg = get_config().security
+    engine = ScoringEngine(cfg)
+    result = DetectorResult(detector="device_limit", triggered=True, score=80, reason="over device limit")
+
+    now = datetime.utcnow()
+    first = await engine.process_event(db_session, make_event(username="peggy", occurred_at=now), [result])
+    assert first.score == pytest.approx(80)
+
+    later = now + timedelta(seconds=cfg.device_limit.score_cooldown_seconds + 1)
+    second = await engine.process_event(db_session, make_event(username="peggy", occurred_at=later), [result])
+    assert second is not None
+    assert second.score > first.score  # decayed remainder plus a fresh 80
+
+
+async def test_device_limit_cooldown_does_not_suppress_other_detectors(db_session):
+    """device_limit firing alongside a real abuse signal (port_scan) within
+    the cooldown window still scores — the cooldown only ever drops
+    device_limit's own contribution, never anything else in the same
+    event."""
+    cfg = get_config().security
+    engine = ScoringEngine(cfg)
+    device_result = DetectorResult(detector="device_limit", triggered=True, score=80, reason="over device limit")
+    scan_result = DetectorResult(detector="port_scan", triggered=True, score=60, reason="scanning")
+
+    now = datetime.utcnow()
+    first = await engine.process_event(db_session, make_event(username="quinn", occurred_at=now), [device_result])
+    assert first.score == pytest.approx(80)
+
+    soon = now + timedelta(seconds=1)
+    second = await engine.process_event(
+        db_session, make_event(username="quinn", occurred_at=soon), [device_result, scan_result]
+    )
+    assert second is not None
+    assert [r.detector for r in second.triggered] == ["port_scan"]
+
+
+async def test_device_limit_score_cooldown_seconds_zero_disables_gate(db_session):
+    cfg = get_config().security.model_copy(deep=True)
+    cfg.device_limit.score_cooldown_seconds = 0
+    engine = ScoringEngine(cfg)
+    result = DetectorResult(detector="device_limit", triggered=True, score=80, reason="over device limit")
+
+    now = datetime.utcnow()
+    await engine.process_event(db_session, make_event(username="rhea", occurred_at=now), [result])
+
+    soon = now + timedelta(seconds=1)
+    second = await engine.process_event(db_session, make_event(username="rhea", occurred_at=soon), [result])
+    assert second is not None
+    assert second.score == pytest.approx(160, rel=0.01)  # old behavior: scores every event
+
+
 async def test_score_decays_between_events_far_apart_in_time(db_session):
     cfg = get_config().security
     engine = ScoringEngine(cfg)
