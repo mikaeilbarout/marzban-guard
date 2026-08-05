@@ -51,8 +51,13 @@ security:
   scan_detection:
     enabled: true
     window_seconds: 60      # rolling window the two thresholds below apply to
-    port_threshold: 80      # distinct destination ports in the window
-    ip_threshold: 50        # distinct destination IPs in the window
+    # A VPN egress naturally fans out to dozens of destination IPs/ports
+    # per minute just from ordinary app/browser use (CDNs, ads, telemetry,
+    # video) — these need real headroom above normal traffic, not just
+    # above a quiet account, or a brand-new user's first active minute
+    # trips this before they've done anything abusive.
+    port_threshold: 150     # distinct destination ports in the window
+    ip_threshold: 150       # distinct destination IPs in the window
     port_scan_max_distinct_ips: 5    # port scan = many ports concentrated on few hosts
     max_tracked_destinations: 2000   # memory-exhaustion guard, see docs/ARCHITECTURE.md
 
@@ -104,8 +109,13 @@ security:
     # least this long has passed since the user's last flagged event —
     # otherwise one sustained burst (e.g. one port scan spanning many
     # connections a few ms apart) would compound the bonus dozens of times
-    # for what is really a single incident.
-    repeat_offense_min_gap_seconds: 60
+    # for what is really a single incident. This must be comfortably
+    # longer than scan_detection.window_seconds/device_limit.window_minutes
+    # etc, or a user who simply keeps doing the SAME ongoing (possibly
+    # legitimate) thing across consecutive windows gets bonus-stacked once
+    # per window and can rocket from "first flag" to blacklisted within a
+    # couple of minutes without their behavior ever actually escalating.
+    repeat_offense_min_gap_seconds: 900
     thresholds:
       level_1: 20    # log only
       level_2: 50    # + notify admin
