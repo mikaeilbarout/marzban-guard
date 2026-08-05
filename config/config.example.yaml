@@ -41,12 +41,14 @@ geoip:
 # user (e.g. a legitimate power user who needs a higher connection ceiling).
 # ---------------------------------------------------------------------------
 security:
-  connection_limit_per_minute: 150
-  connection_limit_per_hour: 5000
-  concurrent_limit: 100
+  connection_limit_per_minute: 300
+  connection_limit_per_hour: 10000
+  concurrent_limit: 200
   # Only meaningful if the node's Xray log level emits "rejected" lines —
-  # see docs/DATA_SOURCES.md.
-  failed_connection_threshold_per_minute: 50
+  # see docs/DATA_SOURCES.md. Raised well above a normal blip (a flaky
+  # mobile network retrying DNS/handshakes generates plenty of these on
+  # its own) so this only fires on a real burst.
+  failed_connection_threshold_per_minute: 100
 
   scan_detection:
     enabled: true
@@ -56,9 +58,9 @@ security:
     # video) — these need real headroom above normal traffic, not just
     # above a quiet account, or a brand-new user's first active minute
     # trips this before they've done anything abusive.
-    port_threshold: 150     # distinct destination ports in the window
-    ip_threshold: 150       # distinct destination IPs in the window
-    port_scan_max_distinct_ips: 5    # port scan = many ports concentrated on few hosts
+    port_threshold: 250     # distinct destination ports in the window
+    ip_threshold: 250       # distinct destination IPs in the window
+    port_scan_max_distinct_ips: 10   # port scan = many ports concentrated on few hosts
     max_tracked_destinations: 2000   # memory-exhaustion guard, see docs/ARCHITECTURE.md
 
   # Xray's access log has no "connection closed" line, so true concurrency
@@ -88,7 +90,7 @@ security:
   spam_detection:
     enabled: true
     ports: [25, 465, 587]
-    distinct_ip_threshold: 30
+    distinct_ip_threshold: 60
 
   # Points added to a user's rolling abuse score per detector trigger.
   # These are inputs to detectors/*.py — see docs/ARCHITECTURE.md for the
@@ -101,7 +103,7 @@ security:
       too_many_destination_ports: 35
       repeated_suspicious_behavior: 80
       failed_connection_burst: 30
-      device_limit_exceeded: 80   # matches thresholds.level_3 — one trigger alone suspends
+      device_limit_exceeded: 80   # below thresholds.level_3 now — needs another detector alongside it to actually suspend (device_limit_warn_only already keeps a solo trigger from reaching Marzban anyway)
     # Score decays exponentially with this half-life so old infractions
     # stop counting against a user who's since behaved.
     decay_half_life_seconds: 1800
@@ -117,11 +119,11 @@ security:
     # couple of minutes without their behavior ever actually escalating.
     repeat_offense_min_gap_seconds: 900
     thresholds:
-      level_1: 20    # log only
-      level_2: 50    # + notify admin
-      level_3: 80    # + temporary suspend
-      level_4: 120   # + disable account
-      level_5: 160   # + permanent blacklist (manual review required)
+      level_1: 30    # log only
+      level_2: 75    # + notify admin
+      level_3: 120   # + temporary suspend
+      level_4: 180   # + disable account
+      level_5: 240   # + permanent blacklist (manual review required)
 
   mitigation:
     level_4_requires_manual_reenable: true
